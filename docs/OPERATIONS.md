@@ -44,6 +44,24 @@ AUTOCONTENT_COOKIE_SECURE=true
 - *Not implemented:* a relay protocol for dashboards hosted somewhere that can't reach the PC
   through a tunnel. The design is in `docs/ARCHITECTURE.md` §2.
 
+### Private phone access with Tailscale (recommended)
+Reachable only from devices signed in to your tailnet; nothing is exposed to the internet and the app
+stays bound to `127.0.0.1`.
+1. Install Tailscale on the PC and the phone; sign in to both with the same account (enable 2FA on it).
+2. On the PC, run `tailscale serve --bg --https=443 http://127.0.0.1:8000`. The first time, it prints a
+   `login.tailscale.com/f/serve?...` link: open it to allow Serve and HTTPS certificates on the tailnet,
+   then run the command again.
+3. Set `AUTOCONTENT_COOKIE_SECURE=true` in `.env` and restart (`scripts/stop.ps1`, then the
+   "AutoContent AI" scheduled task or `scripts/start.ps1 -Hidden`). Browsers still accept the secure
+   cookie on `http://localhost`.
+4. On the phone, open `https://<pc-name>.<tailnet>.ts.net` with Tailscale switched on.
+
+Serve config survives reboots (the Tailscale service starts automatically). Only port 443 → 8000 is
+served; ComfyUI (8188) is not. Check with `tailscale serve status`; remove with
+`tailscale serve --https=443 off`. Do **not** set `AUTOCONTENT_PUBLIC_BASE_URL` to the `ts.net` address:
+Meta/TikTok/Google cannot reach it, so OAuth redirects and Instagram Login's `video_url` must use a
+public tunnel instead. A lost phone: remove it in the Tailscale admin console.
+
 ## Security checklist
 - Dashboard login is required for every API except health and the OAuth callback (which is
   validated by a single-use, 15-minute `state`).

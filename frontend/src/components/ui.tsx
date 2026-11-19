@@ -174,9 +174,9 @@ export function Dialog({ open, onClose, title, description, children, wide }: {
   }, [open, onClose]);
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 backdrop-blur-sm" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-2 backdrop-blur-sm sm:p-4" onMouseDown={onClose}>
       <div
-        className={cn("mt-[6vh] w-full rounded-2xl border bg-card shadow-2xl", wide ? "max-w-5xl" : "max-w-lg")}
+        className={cn("mt-2 w-full min-w-0 rounded-2xl border bg-card shadow-2xl sm:mt-[6vh]", wide ? "max-w-5xl" : "max-w-lg")}
         onMouseDown={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -190,7 +190,7 @@ export function Dialog({ open, onClose, title, description, children, wide }: {
             <X className="size-4" />
           </button>
         </div>
-        <div className="p-5">{children}</div>
+        <div className="p-4 sm:p-5">{children}</div>
       </div>
     </div>
   );
