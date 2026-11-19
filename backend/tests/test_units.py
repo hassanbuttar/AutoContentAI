@@ -116,3 +116,91 @@ def test_comfy_workflow_validation_and_mapping(env):
     assert applied["2"]["inputs"]["text"] == "hello" and wf["2"]["inputs"]["text"] == "x"
     assert not c.validate({"nodes": [], "links": []}, {})["ok"]
     _ = json
+
+
+def test_instagram_token_connect_exchanges_for_long_lived_and_finds_ig_account():
+    import httpx
+
+    from app.services.publishing.base import OAuthClient
+    from app.services.publishing.instagram import InstagramAdapter
+
+    seen = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req.url.path)
+        if req.url.path.endswith("/oauth/access_token"):
+            assert req.url.params["grant_type"] == "fb_exchange_token"
+            assert req.url.params["fb_exchange_token"] == "short-lived-token-from-explorer"
+            return httpx.Response(200, json={"access_token": "long-lived", "expires_in": 5183944})
+        if req.url.path.endswith("/me/accounts"):
+            assert req.url.params["access_token"] == "long-lived"
+            return httpx.Response(200, json={"data": [
+                {"id": "p1", "name": "Other", "instagram_business_account": {"id": "111", "username": "other"}},
+                {"id": "p2", "name": "Stylwear", "instagram_business_account": {"id": "222", "username": "stylwear"}}]})
+        return httpx.Response(404)
+
+    ad = InstagramAdapter(httpx.Client(transport=httpx.MockTransport(handler)))
+    s = {"variant": "facebook_login", "graph_version": "v25.0", "ig_user_id": "222"}
+    tokens = ad.connect_with_token(OAuthClient("app-id", "app-secret"), "short-lived-token-from-explorer", s)
+    assert tokens.access_token == "long-lived" and tokens.expires_at is not None
+    info = ad.account_info(tokens, s)
+    assert info == {"external_account_id": "222", "display_name": "@stylwear"}
+    assert tokens.extra["page_id"] == "p2"
+
+
+def test_instagram_resumes_failed_upload_into_same_container(tmp_path):
+    """A TLS/network failure during the rupload step must not strand the post: verify() reports IN_PROGRESS as
+    not published, and the retry re-uploads into the same container and publishes exactly once."""
+    import httpx
+
+    from app.services.publishing.base import PostContent, PublishContext, TokenSet
+    from app.services.publishing.instagram import InstagramAdapter
+
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"\0" * 1000)
+    calls = {"create": 0, "upload": 0, "publish": 0}
+    fail_upload = {"on": True}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path.endswith("/content_publishing_limit"):
+            return httpx.Response(200, json={"data": [{"quota_usage": 0, "config": {"quota_total": 100}}]})
+        if path.endswith("/ig1/media"):
+            calls["create"] += 1
+            return httpx.Response(200, json={"id": "c1", "uri": "https://rupload.facebook.com/ig-api-upload/v25.0/c1"})
+        if req.url.host == "rupload.facebook.com":
+            if fail_upload["on"]:
+                raise httpx.ConnectError("CERTIFICATE_VERIFY_FAILED")
+            calls["upload"] += 1
+            return httpx.Response(200, json={"success": True})
+        if path.endswith("/c1"):
+            return httpx.Response(200, json={"status_code": "FINISHED" if calls["upload"] else "IN_PROGRESS"})
+        if path.endswith("/media_publish"):
+            calls["publish"] += 1
+            return httpx.Response(200, json={"id": "m1"})
+        if path.endswith("/m1"):
+            return httpx.Response(200, json={"permalink": "https://www.instagram.com/reel/abc/"})
+        return httpx.Response(404)
+
+    state: dict = {}
+
+    def save(patch):
+        state.update(patch)
+
+    def ctx():
+        return PublishContext(video_path=video, video_meta={}, post=PostContent("t", "cap", []),
+                              tokens=TokenSet("tok", extra={"ig_user_id": "ig1"}),
+                              account_settings={"variant": "facebook_login", "poll_seconds": 0},
+                              state=state, save_state=save, progress=lambda m: None, public_url=None)
+
+    ad = InstagramAdapter(httpx.Client(transport=httpx.MockTransport(handler)))
+    import pytest
+
+    with pytest.raises(httpx.ConnectError):
+        ad.publish(ctx())
+    assert state["container_id"] == "c1" and not state["uploaded"]
+    assert ad.verify(ctx()).status == "not_published"
+    fail_upload["on"] = False
+    res = ad.publish(ctx())
+    assert res.status == "published" and res.external_id == "m1"
+    assert calls == {"create": 1, "upload": 1, "publish": 1}

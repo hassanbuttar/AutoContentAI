@@ -479,3 +479,39 @@ def test_asset_paths_cannot_escape_storage(env, bad):
 
     with pytest.raises(PathNotAllowed):
         storage_path(bad)
+
+
+def test_import_external_video_conforms_qcs_and_publishes_like_generated(client, env):
+    """A landscape, silent clip made by another tool is conformed to 1080x1920 H.264/AAC, passes QC, keeps the
+    user's caption, is rejected as a duplicate on re-upload, and can be queued on an account."""
+    from app.services.video import ffmpeg
+
+    src = env["tmp"] / "external.mp4"
+    ffmpeg.run(["-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25:duration=5", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                str(src)])
+    a = client.post("/api/applications", json={"name": "Stylwear"}).json()
+    form = {"title": "Packing demo", "caption": "Pack outfits, not possibilities.", "hashtags": "#travel, packing #Stylwear"}
+    with open(src, "rb") as fh:
+        r = client.post(f"/api/applications/{a['id']}/videos/import", data=form, files={"file": ("demo.mp4", fh, "video/mp4")})
+    assert r.status_code == 201, r.text
+    v = r.json()
+    assert v["status"] == "ready" and v["renderer"] == "imported+conformed"
+    assert (v["width"], v["height"]) == (1080, 1920) and abs(v["fps"] - 30) < 1
+    assert v["qc_report"]["ok"], v["qc_report"]
+    d = client.get(f"/api/videos/{v['id']}").json()
+    ig = d["script"]["social_content"]["instagram"]
+    assert ig["caption"] == "Pack outfits, not possibilities." and ig["hashtags"] == ["#travel", "#packing", "#Stylwear"]
+    assert d["script"]["social_content"]["youtube"]["title"] == "Packing demo"
+    # same source again -> identical conformed output -> duplicate
+    with open(src, "rb") as fh:
+        r2 = client.post(f"/api/applications/{a['id']}/videos/import", data=form, files={"file": ("demo.mp4", fh, "video/mp4")})
+    assert r2.status_code == 409
+    # not a video
+    r3 = client.post(f"/api/applications/{a['id']}/videos/import", data=form, files={"file": ("x.mp4", b"not a video" * 50, "video/mp4")})
+    assert r3.status_code == 400
+    # queue it on an export account like any generated video
+    acc = client.post("/api/accounts", json={"application_id": a["id"], "platform": "instagram", "display_name": "IG",
+                                             "export_only": True}).json()
+    p = client.post("/api/publications", json={"video_id": v["id"], "social_account_id": acc["id"], "approve": True})
+    assert p.status_code == 201, p.text
+    assert p.json()["caption"] == "Pack outfits, not possibilities."

@@ -1,13 +1,128 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
-import { CheckCircle2, Clapperboard, Download, Send, ThumbsDown, ThumbsUp, Trash2, XCircle } from "lucide-react";
+import { CheckCircle2, Clapperboard, Download, Send, ThumbsDown, ThumbsUp, Trash2, Upload, XCircle } from "lucide-react";
 import { api } from "@/lib/api";
-import { useAction, useApi } from "@/lib/hooks";
+import { useAction, useApi, useToast } from "@/lib/hooks";
 import { fmtBytes, fmtRelative, PLATFORM_LABEL } from "@/lib/utils";
 import {
-  Badge, Button, Card, Dialog, Empty, Field, Input, PageHeader, Select, Spinner, StatusBadge, Switch, Tabs,
+  Badge, Button, Card, Dialog, Empty, Field, Input, PageHeader, Select, Spinner, StatusBadge, Switch, Tabs, Textarea,
 } from "@/components/ui";
 import { StoryboardEditor } from "./Studio";
+
+const splitTags = (s: string) =>
+  s.split(/[\s,]+/).filter((x) => x.replace(/#/g, "")).map((x) => (x.startsWith("#") ? x : `#${x}`));
+
+function ImportDialog({ open, onClose, apps, defaultApp, onImported }: {
+  open: boolean; onClose: () => void; apps: any[]; defaultApp: string; onImported: (id: number) => void;
+}) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const input = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [f, setF] = useState({ app: "", title: "", caption: "", hashtags: "", youtube_title: "", fit: "auto" });
+  useEffect(() => {
+    if (open) setF((x) => ({ ...x, app: defaultApp || x.app || String(apps[0]?.id ?? "") }));
+  }, [open, defaultApp, apps]);
+  const pick = (fl: FileList | null) => {
+    const x = fl?.[0];
+    if (!x) return;
+    setFile(x);
+    setF((s) => (s.title ? s : { ...s, title: x.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ") }));
+  };
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!file || !f.app) return;
+    const fd = new FormData();
+    fd.append("file", file);
+    (["title", "caption", "hashtags", "youtube_title", "fit"] as const).forEach((k) => fd.append(k, f[k]));
+    setBusy(true);
+    try {
+      const v: any = await api.upload(`/api/applications/${f.app}/videos/import`, fd);
+      const ok = v.status === "ready";
+      toast(ok ? "Video imported" : "Imported, but it failed QC: see Quality checks", ok ? "success" : "error");
+      qc.invalidateQueries({ queryKey: ["videos"] });
+      setFile(null);
+      setF((s) => ({ ...s, title: "", caption: "", hashtags: "", youtube_title: "" }));
+      onClose();
+      onImported(v.id);
+    } catch (err: any) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open={open} onClose={() => !busy && onClose()} title="Import a video"
+      description="Bring in a finished video made by another script or editor. It is checked and, if needed, converted to 1080x1920 H.264/AAC for Reels, Shorts and TikTok.">
+      <form className="space-y-4" onSubmit={submit}>
+        <div onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); pick(e.dataTransfer.files); }}
+          onClick={() => input.current?.click()}
+          className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 text-center hover:bg-muted/50">
+          <Upload className="size-6 text-muted-foreground" />
+          <p className="mt-2 text-sm font-medium">{file ? file.name : "Drop a video here or click to choose"}</p>
+          <p className="text-xs text-muted-foreground">{file ? fmtBytes(file.size) : "MP4, MOV, WebM, MKV · up to 3 minutes, 1 GB"}</p>
+          <input ref={input} type="file" accept="video/*,.mkv" hidden onChange={(e) => pick(e.target.files)} />
+        </div>
+        <Field label="Application">
+          <Select value={f.app} onChange={(e) => setF({ ...f, app: e.target.value })} required>
+            {apps.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </Select>
+        </Field>
+        <Field label="Title"><Input value={f.title} maxLength={300} onChange={(e) => setF({ ...f, title: e.target.value })} /></Field>
+        <Field label="Caption" hint="Used for Instagram and TikTok, and as the YouTube description. Not fact-checked: review it yourself.">
+          <Textarea rows={4} maxLength={2200} value={f.caption} onChange={(e) => setF({ ...f, caption: e.target.value })} />
+        </Field>
+        <Field label="Hashtags" hint="Separated by spaces or commas">
+          <Input value={f.hashtags} onChange={(e) => setF({ ...f, hashtags: e.target.value })} />
+        </Field>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="YouTube title (optional)">
+            <Input value={f.youtube_title} maxLength={100} onChange={(e) => setF({ ...f, youtube_title: e.target.value })} />
+          </Field>
+          <Field label="If not 9:16" hint="Fit keeps the whole frame on a blurred background">
+            <Select value={f.fit} onChange={(e) => setF({ ...f, fit: e.target.value })}>
+              <option value="auto">Fit (blurred background)</option>
+              <option value="crop">Crop to fill</option>
+            </Select>
+          </Field>
+        </div>
+        <Button type="submit" disabled={!file || !f.app} loading={busy}>{busy ? "Importing and checking…" : "Import video"}</Button>
+      </form>
+    </Dialog>
+  );
+}
+
+function CaptionEditor({ script, onSaved }: { script: any; onSaved: () => void }) {
+  const sc = script.social_content ?? {};
+  const [c, setC] = useState({
+    caption: sc.instagram?.caption ?? "",
+    hashtags: (sc.instagram?.hashtags ?? []).join(" "),
+    youtube_title: sc.youtube?.title ?? "",
+  });
+  const save = useAction(() => {
+    const tags = splitTags(c.hashtags);
+    return api.put(`/api/scripts/${script.id}`, {
+      social_content: {
+        instagram: { caption: c.caption, hashtags: tags },
+        tiktok: { caption: c.caption, hashtags: tags },
+        youtube: { title: c.youtube_title, description: c.caption, tags: tags.map((x) => x.slice(1)) },
+      },
+    });
+  }, [["videos"]], "Captions saved");
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-muted-foreground">
+        Imported video. These captions apply to posts created from now on; posts already in the queue keep their own caption.
+      </p>
+      <Field label="Caption"><Textarea rows={5} maxLength={2200} value={c.caption} onChange={(e) => setC({ ...c, caption: e.target.value })} /></Field>
+      <Field label="Hashtags"><Input value={c.hashtags} onChange={(e) => setC({ ...c, hashtags: e.target.value })} /></Field>
+      <Field label="YouTube title"><Input value={c.youtube_title} maxLength={100} onChange={(e) => setC({ ...c, youtube_title: e.target.value })} /></Field>
+      <Button loading={save.isPending} onClick={async () => { await save.mutateAsync(undefined); onSaved(); }}>Save captions</Button>
+    </div>
+  );
+}
 
 function VideoDetail({ id, onClose }: { id: number; onClose: () => void }) {
   const { data: v, refetch } = useApi(["video", id], `/api/videos/${id}`);
@@ -22,6 +137,7 @@ function VideoDetail({ id, onClose }: { id: number; onClose: () => void }) {
     scheduled_for: sched.when ? new Date(sched.when).toISOString() : null,
   }), inv, "Publication created");
   if (!v) return <Spinner />;
+  const imported = String(v.renderer ?? "").startsWith("imported");
   const accs = (accounts ?? []).filter((a) => a.application_id === v.application_id);
   return (
     <div className="grid gap-6 lg:grid-cols-5">
@@ -41,7 +157,7 @@ function VideoDetail({ id, onClose }: { id: number; onClose: () => void }) {
         </div>
       </div>
       <div className="lg:col-span-3">
-        <Tabs value={tab} onChange={setTab} tabs={[{ id: "review", label: "Quality checks" }, { id: "script", label: "Script & storyboard" },
+        <Tabs value={tab} onChange={setTab} tabs={[{ id: "review", label: "Quality checks" }, { id: "script", label: imported ? "Captions" : "Script & storyboard" },
           { id: "publish", label: "Publish", count: v.publications.length }, { id: "assets", label: "Generation log" }]} />
         <div className="mt-4">
           {tab === "review" && (
@@ -55,7 +171,9 @@ function VideoDetail({ id, onClose }: { id: number; onClose: () => void }) {
               ))}
             </div>
           )}
-          {tab === "script" && v.script && <StoryboardEditor script={v.script} onSaved={() => refetch()} />}
+          {tab === "script" && v.script && (imported
+            ? <CaptionEditor script={v.script} onSaved={() => refetch()} />
+            : <StoryboardEditor script={v.script} onSaved={() => refetch()} />)}
           {tab === "publish" && (
             <div className="space-y-4">
               {v.publications.map((p: any) => (
@@ -98,18 +216,20 @@ export function Library() {
   const [appId, setAppId] = useState("");
   const [review, setReview] = useState("");
   const [open, setOpen] = useState<number | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
   const { data: apps } = useApi<any[]>(["applications"], "/api/applications");
   const url = `/api/videos?limit=120${appId ? `&application_id=${appId}` : ""}${review ? `&review_status=${review}` : ""}`;
   const { data, isLoading } = useApi<any[]>(["videos", url], url, { refetchInterval: 10000 });
   useEffect(() => { const v = params.get("video"); if (v) setOpen(Number(v)); }, [params]);
   return (
     <div>
-      <PageHeader title="Content Library" description="Every rendered video with its QC report, script and publishing history."
+      <PageHeader title="Content Library" description="Every generated or imported video with its QC report, captions and publishing history."
         actions={<>
+          <Button onClick={() => setImportOpen(true)} disabled={!apps?.length}><Upload /> Import video</Button>
           <Select className="w-48" value={appId} onChange={(e) => setAppId(e.target.value)}><option value="">All applications</option>{apps?.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</Select>
           <Select className="w-40" value={review} onChange={(e) => setReview(e.target.value)}><option value="">Any review</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></Select>
         </>} />
-      {isLoading ? <Spinner /> : !data?.length ? <Empty icon={Clapperboard} title="No videos yet">Generate one from the AI Content Studio.</Empty> : (
+      {isLoading ? <Spinner /> : !data?.length ? <Empty icon={Clapperboard} title="No videos yet">Generate one from the AI Content Studio, or import a finished video.</Empty> : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
           {data.map((v) => (
             <button key={v.id} onClick={() => setOpen(v.id)} className="group text-left">
@@ -126,6 +246,7 @@ export function Library() {
           ))}
         </div>
       )}
+      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} apps={apps ?? []} defaultApp={appId} onImported={(id) => setOpen(id)} />
       <Dialog open={open !== null} onClose={() => setOpen(null)} title={`Video #${open ?? ""}`} wide>
         {open !== null && <VideoDetail id={open} onClose={() => setOpen(null)} />}
       </Dialog>

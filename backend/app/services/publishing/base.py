@@ -126,6 +126,10 @@ class PlatformAdapter:
     def exchange_code(self, client: OAuthClient, code: str, redirect_uri: str, code_verifier: str, settings: dict) -> TokenSet:
         raise NotImplementedError
 
+    def connect_with_token(self, client: OAuthClient, access_token: str, settings: dict) -> TokenSet:
+        """Connect with a token the user obtained from the platform's own developer tools (no redirect flow)."""
+        raise NotConfigured(f"{self.display_name} only connects through the OAuth sign-in flow")
+
     def refresh(self, client: OAuthClient, tokens: TokenSet, settings: dict) -> TokenSet:
         raise PublishError("Token refresh not supported; reconnect the account", reauth=True)
 

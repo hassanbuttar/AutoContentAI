@@ -190,8 +190,11 @@ def cancel(db: Session, job: ScheduledJob) -> bool:
     return True
 
 
-def retry_now(db: Session, job: ScheduledJob) -> None:
-    if job.status in ("failed", "cancelled", "retry_wait", "blocked"):
+def retry_now(db: Session, job: ScheduledJob, include_succeeded: bool = False) -> None:
+    """Requeue a job to run now. `include_succeeded` re-runs a finished job; only for handlers that are
+    idempotent on their own (publish: guarded by the publication's approved->publishing compare-and-set)."""
+    allowed = ("failed", "cancelled", "retry_wait", "blocked") + (("succeeded",) if include_succeeded else ())
+    if job.status in allowed:
         if job.attempts >= job.max_attempts:
             job.max_attempts = job.attempts + 1
         job.status = "queued"

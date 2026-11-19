@@ -3,7 +3,8 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 
@@ -141,6 +142,50 @@ def list_videos(application_id: int | None = None, status: str | None = None, re
                              for p in db.scalars(select(PublicationRecord).where(PublicationRecord.rendered_video_id == v.id))]
         out.append(d)
     return out
+
+
+IMPORT_MAX_BYTES = 1024 * 1024 * 1024
+
+
+@router.post("/applications/{app_id}/videos/import", status_code=201)
+async def import_video(app_id: int, file: UploadFile = File(...), title: str = Form(""), caption: str = Form(""),
+                       hashtags: str = Form(""), youtube_title: str = Form(""), fit: str = Form("auto"),
+                       user: User = AuthUser, db: Session = Depends(get_db)):
+    """Bring a finished video made elsewhere into the library (conformed to 9:16 if needed, QC'd, deduplicated)."""
+    import re
+    import tempfile
+    from pathlib import Path
+
+    from app.core.config import get_settings
+    from app.services.video import importer
+
+    app = get_or_404(db, Application, app_id)
+    if len(title) > 300 or len(caption) > 2200 or len(youtube_title) > 100 or len(hashtags) > 1000:
+        raise HTTPException(400, "Title max 300, caption max 2200, YouTube title max 100 characters")
+    tmp_dir = get_settings().storage("tmp")
+    fd, tmp_name = tempfile.mkstemp(suffix=Path(file.filename or "upload.mp4").suffix[:10] or ".mp4", dir=tmp_dir)
+    tmp = Path(tmp_name)
+    try:
+        size = 0
+        with open(fd, "wb") as fh:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > IMPORT_MAX_BYTES:
+                    raise HTTPException(413, "File too large (1 GB max)")
+                fh.write(chunk)
+        tags = [t for t in re.split(r"[\s,]+", hashtags) if t.strip("#")]
+        try:
+            video = await run_in_threadpool(importer.import_video, db, app, tmp, original_name=file.filename or "upload",
+                                            title=title, caption=caption, hashtags=tags, youtube_title=youtube_title, fit=fit)
+        except importer.DuplicateVideo as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except importer.ImportProblem as exc:
+            raise HTTPException(400, str(exc)) from exc
+        audit(db, "video.import", user.id, "video", video.id, {"name": (file.filename or "")[:200], "renderer": video.renderer})
+        db.commit()
+        return ser_video(video)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 @router.get("/videos/{video_id}")
@@ -339,7 +384,7 @@ def publish_now(pub_id: int, user: User = AuthUser, db: Session = Depends(get_db
     job, created = enqueue(db, "publish", {"publication_id": p.id}, idempotency_key=f"publish:{p.id}",
                            application_id=p.application_id, priority=5)
     if not created and job.status in ("failed", "cancelled", "succeeded"):
-        q.retry_now(db, job)
+        q.retry_now(db, job, include_succeeded=True)
     audit(db, "publication.publish_now", user.id, "publication", p.id)
     db.commit()
     return {"publication": ser_pub(p), "job_id": job.id}

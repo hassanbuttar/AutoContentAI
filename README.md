@@ -66,12 +66,14 @@ Legend: ✅ done and tested · ☑️ done, verified manually · 🟡 implemente
 | Project scanning (local folder/git, GitHub, GitLab, docs, changelog, manual notes) | ✅ local · 🟡 GitHub/GitLab | hosted APIs implemented, not run against a live repo |
 | Incremental change detection + local classifier; AI call skipping | ✅ | Scenario 2 |
 | Knowledge profile (facts with stable IDs), editable in UI | ✅ ☑️ | |
-| Claude adapter: structured outputs, prompt caching, budgets, usage/cost, refusal fallback | ✅ (mocked) · 🟡 live | not called live (no API key in this environment) |
+| Claude adapter: structured outputs, prompt caching, budgets, usage/cost, refusal fallback | ✅ ☑️ live | profile + content plan run live (claude-opus-5-5) |
 | Local template planner, topic rotation, repetition checks, claim verification | ✅ | Scenarios 3, 8 |
 | ComfyUI: connect, import, validate vs `/object_info`, submit, WS progress, cancel, download | ✅ ☑️ | Qwen-Image workflow run on the live server |
 | Renderer: Ken Burns, screenshots, title cards, SAPI narration, timed captions, logo, music, intro/outro, QC | ✅ ☑️ | 1080×1920 H.264/AAC MP4 verified |
 | ComfyUI-down fallback with actionable error | ✅ | Scenario 9 |
-| Publishing adapters: YouTube, Instagram (2 variants), TikTok (direct/inbox), manual export | ✅ (mocked) · 🟡 live | needs your developer apps + OAuth |
+| Publishing adapters: YouTube, Instagram (2 variants), TikTok (direct/inbox), manual export | ✅ (mocked) · ☑️ Instagram live · 🟡 YouTube/TikTok live | Instagram Reel published via facebook_login + resumable upload |
+| Instagram *Connect with token* (Graph API Explorer token → long-lived) | ✅ ☑️ | |
+| Import finished videos (Library → Import video): probe, conform to 9:16 H.264/AAC, QC, dedup, captions | ✅ ☑️ | publishes and schedules like generated videos |
 | OAuth (state + PKCE, single-use), token refresh/rotation, disconnect | ✅ (mocked) | Scenario 6 |
 | Duplicate-post prevention (CAS, persisted platform IDs, verify, `verify_required`) | ✅ | Scenarios 5, 8 |
 | Approval modes manual / semi / auto + review UI | ✅ ☑️ | Scenario 10 |

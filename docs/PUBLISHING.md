@@ -49,6 +49,13 @@ Two variants (Settings → Social platforms → Instagram → Login variant):
 | `facebook_login` (default) | graph.facebook.com | **resumable upload of the local file** to `rupload.facebook.com/ig-api-upload/<ver>/<container>` | The IG account must be linked to a Facebook Page. Scopes: `instagram_basic, instagram_content_publish, pages_show_list, pages_read_engagement, business_management` |
 | `instagram_login` | graph.instagram.com | Meta **downloads** the video from a public `video_url` | Requires `AUTOCONTENT_PUBLIC_BASE_URL` (tunnel). The app serves `/media/public/<signed-token>.mp4`, valid for 24 h, approved videos only |
 
+**Connect with token (no redirect URI needed):** on the account card choose **Connect with token** and
+paste a *user* access token from Graph API Explorer (generated for your app with the scopes above). The
+app exchanges it for a ~60-day long-lived token via `fb_exchange_token` (using the app id/secret from
+Settings), finds the IG business account through `/me/accounts`, stores the token encrypted and
+refreshes it before expiry. If several IG accounts are linked, put the IG user id in the account's
+settings first. Page tokens are not needed.
+
 Flow: `POST /<IG_ID>/media` (media_type=REELS) → upload → poll `status_code` until `FINISHED` →
 `POST /<IG_ID>/media_publish`. The publishing quota is checked first via `content_publishing_limit`
 (Meta documents 100 API posts per rolling 24 h; one section of its docs says 50).

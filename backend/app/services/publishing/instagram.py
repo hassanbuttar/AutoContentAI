@@ -75,6 +75,23 @@ class InstagramAdapter(PlatformAdapter):
         d = r.json()
         return TokenSet(d["access_token"], None, expires_in(d.get("expires_in", 60 * 24 * 3600)), None, FB_SCOPES)
 
+    def connect_with_token(self, client, access_token: str, s) -> TokenSet:
+        """Facebook Login variant: accept a user access token from Graph API Explorer (needs the FB_SCOPES
+        permissions) and exchange it for a long-lived (~60 day) token with the app id/secret."""
+        if self._variant(s) == "instagram_login":
+            r = self.http.get("https://graph.instagram.com/access_token",
+                              params={"grant_type": "ig_exchange_token", "client_secret": client.client_secret,
+                                      "access_token": access_token})
+            self.raise_for(r, "Instagram long-lived token")
+            d = r.json()
+            return TokenSet(d["access_token"], None, expires_in(d.get("expires_in")), None, IG_SCOPES)
+        r = self.http.get(f"https://graph.facebook.com/{self._ver(s)}/oauth/access_token",
+                          params={"grant_type": "fb_exchange_token", "client_id": client.client_id,
+                                  "client_secret": client.client_secret, "fb_exchange_token": access_token})
+        self.raise_for(r, "Facebook long-lived token")
+        d = r.json()
+        return TokenSet(d["access_token"], None, expires_in(d.get("expires_in", 60 * 24 * 3600)), None, FB_SCOPES)
+
     def refresh(self, client, tokens: TokenSet, s) -> TokenSet:
         if self._variant(s) == "instagram_login":
             r = self.http.get("https://graph.instagram.com/refresh_access_token",
@@ -142,9 +159,14 @@ class InstagramAdapter(PlatformAdapter):
             if total and data.get("quota_usage", 0) >= total:
                 raise PublishError(f"Instagram publishing limit reached ({data.get('quota_usage')}/{total} in 24h)", retryable=True)
         container = ctx.state.get("container_id")
+        resumable = not (self._variant(s) == "instagram_login" or s.get("use_video_url"))
+        if container and resumable and not ctx.state.get("uploaded"):
+            # Resuming: the upload may have completed even though we never recorded it.
+            if self._status(ctx, container) in ("FINISHED", "PUBLISHED"):
+                ctx.save_state({"uploaded": True})
         if not container:
             params = {"media_type": "REELS", "caption": ctx.post.caption_with_tags(2200), "share_to_feed": "true", "access_token": tok}
-            if self._variant(s) == "instagram_login" or s.get("use_video_url"):
+            if not resumable:
                 if not ctx.public_url:
                     raise PublishError("Instagram Login requires a public video URL; set AUTOCONTENT_PUBLIC_BASE_URL or use the facebook_login variant")
                 params["video_url"] = ctx.public_url()
@@ -154,15 +176,18 @@ class InstagramAdapter(PlatformAdapter):
             self.raise_for(r, "Instagram create container")
             d = r.json()
             container = d["id"]
-            ctx.save_state({"container_id": container, "upload_uri": d.get("uri")})
-            if params.get("upload_type") == "resumable":
-                ctx.progress("Uploading video to Meta")
-                size = ctx.video_path.stat().st_size
-                uri = d.get("uri") or f"https://rupload.facebook.com/ig-api-upload/{self._ver(s)}/{container}"
-                with open(ctx.video_path, "rb") as fh:
-                    u = self.http.post(uri, content=fh.read(), headers={"Authorization": f"OAuth {tok}", "offset": "0",
-                                                                        "file_size": str(size)})
-                self.raise_for(u, "Instagram resumable upload")
+            ctx.save_state({"container_id": container, "upload_uri": d.get("uri"), "uploaded": False})
+        # Upload (or resume a failed upload into the same container). Nothing goes live until media_publish, so
+        # re-sending the file into an unpublished container cannot create a duplicate post.
+        if resumable and not ctx.state.get("uploaded"):
+            ctx.progress("Uploading video to Meta")
+            size = ctx.video_path.stat().st_size
+            uri = ctx.state.get("upload_uri") or f"https://rupload.facebook.com/ig-api-upload/{self._ver(s)}/{container}"
+            with open(ctx.video_path, "rb") as fh:
+                u = self.http.post(uri, content=fh.read(), headers={"Authorization": f"OAuth {tok}", "offset": "0",
+                                                                    "file_size": str(size)})
+            self.raise_for(u, "Instagram resumable upload")
+            ctx.save_state({"uploaded": True})
         deadline = time.monotonic() + float(s.get("processing_timeout", 600))
         while time.monotonic() < deadline:
             st = self._status(ctx, container)
@@ -171,7 +196,7 @@ class InstagramAdapter(PlatformAdapter):
             if st == "PUBLISHED":
                 return PublishResult("published", ctx.state.get("media_id"), detail="container already published")
             if st in ("ERROR", "EXPIRED"):
-                ctx.save_state({"container_id": None})
+                ctx.save_state({"container_id": None, "uploaded": False})
                 raise PublishError(f"Instagram processing {st}", retryable=st == "EXPIRED")
             ctx.progress(f"Instagram processing ({st or 'pending'})")
             time.sleep(float(s.get("poll_seconds", 15)))
@@ -189,8 +214,10 @@ class InstagramAdapter(PlatformAdapter):
         if st == "FINISHED":  # created and processed but never published: safe to publish exactly this container
             return self._publish_container(ctx, container)
         if st in ("ERROR", "EXPIRED"):
-            ctx.save_state({"container_id": None})
+            ctx.save_state({"container_id": None, "uploaded": False})
             return PublishResult("not_published", detail=f"container {st}")
+        if st == "IN_PROGRESS":  # nothing is live until media_publish succeeds; publish() resumes upload/polling
+            return PublishResult("not_published", detail="container still in progress (upload incomplete or processing)")
         return PublishResult("unknown", detail=f"container status {st}")
 
     def fetch_metrics(self, tokens: TokenSet, external_id: str, s: dict) -> Metrics:

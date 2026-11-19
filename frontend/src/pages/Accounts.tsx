@@ -11,7 +11,8 @@ import {
 const PLATFORM_SETTINGS: Record<string, { key: string; label: string; options?: string[]; hint?: string }[]> = {
   youtube: [{ key: "privacy", label: "Privacy", options: ["public", "unlisted", "private"] }],
   instagram: [{ key: "variant", label: "Login variant", options: ["facebook_login", "instagram_login"],
-    hint: "facebook_login uploads local files directly; instagram_login needs AUTOCONTENT_PUBLIC_BASE_URL" }],
+    hint: "facebook_login uploads local files directly; instagram_login needs AUTOCONTENT_PUBLIC_BASE_URL" },
+    { key: "ig_user_id", label: "Instagram user id (optional)", hint: "IG_USER_ID: picks this account when several are linked to your Pages" }],
   tiktok: [{ key: "post_mode", label: "Post mode", options: ["direct", "inbox"], hint: "inbox sends a draft to the TikTok app" },
     { key: "privacy_level", label: "Privacy", options: ["SELF_ONLY", "PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR"],
       hint: "Unaudited TikTok apps can only post SELF_ONLY" }],
@@ -22,7 +23,10 @@ function AccountCard({ a }: { a: any }) {
   const { toast } = useToast();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [s, setS] = useState<any>(a.settings ?? {});
+  const [tokenOpen, setTokenOpen] = useState(false);
+  const [token, setToken] = useState("");
   const inv = [["accounts"]];
+  const tokenConnect = useAction((t: string) => api.post(`/api/accounts/${a.id}/token-connect`, { access_token: t }), inv, "Connected");
   const connect = async () => {
     try {
       const r = await api.post(`/api/accounts/${a.id}/oauth/start`);
@@ -62,6 +66,9 @@ function AccountCard({ a }: { a: any }) {
       )}
       <div className="mt-4 flex flex-wrap gap-2">
         {!isExport && a.status !== "connected" && <Button size="sm" onClick={connect}><Plug /> Connect</Button>}
+        {!isExport && a.platform === "instagram" && (
+          <Button size="sm" variant="outline" onClick={() => setTokenOpen(true)}>Connect with token</Button>
+        )}
         {!isExport && a.status === "connected" && <>
           <Button size="sm" variant="outline" loading={test.isPending} onClick={async () => {
             const r: any = await test.mutateAsync();
@@ -88,14 +95,35 @@ function AccountCard({ a }: { a: any }) {
           )}
           {(PLATFORM_SETTINGS[a.platform] ?? []).map((f) => (
             <Field key={f.key} label={f.label} hint={f.hint}>
-              <Select value={s[f.key] ?? ""} onChange={(e) => setS({ ...s, [f.key]: e.target.value })}>
-                <option value="">Default</option>
-                {f.options!.map((o) => <option key={o}>{o}</option>)}
-              </Select>
+              {f.options ? (
+                <Select value={s[f.key] ?? ""} onChange={(e) => setS({ ...s, [f.key]: e.target.value })}>
+                  <option value="">Default</option>
+                  {f.options.map((o) => <option key={o}>{o}</option>)}
+                </Select>
+              ) : (
+                <Input value={s[f.key] ?? ""} onChange={(e) => setS({ ...s, [f.key]: e.target.value.trim() })} />
+              )}
             </Field>
           ))}
           <Button onClick={async () => { await patch.mutateAsync({ settings: s }); setSettingsOpen(false); }}>Save settings</Button>
         </div>
+      </Dialog>
+      <Dialog open={tokenOpen} onClose={() => { setTokenOpen(false); setToken(""); }} title="Connect with an access token">
+        <form className="space-y-4" onSubmit={async (e) => {
+          e.preventDefault();
+          try { await tokenConnect.mutateAsync(token); setTokenOpen(false); } finally { setToken(""); }
+        }}>
+          <p className="text-xs text-muted-foreground">
+            Paste a <b>user</b> access token from Meta Graph API Explorer with instagram_basic, instagram_content_publish,
+            pages_show_list and business_management. It is exchanged for a 60-day token using the app id/secret from
+            Settings → Social platforms, stored encrypted, and never shown again. Set the Instagram user id in this
+            account's settings first if several Instagram accounts are linked.
+          </p>
+          <Field label="Access token">
+            <Input type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} />
+          </Field>
+          <Button type="submit" disabled={token.trim().length < 20} loading={tokenConnect.isPending}>Connect</Button>
+        </form>
       </Dialog>
     </Card>
   );

@@ -14,9 +14,11 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.core.db import SessionLocal, get_engine
 from app.core.logging_setup import setup_logging
+from app.core.net import use_system_trust
 from app.models import ComfyWorkflow
 
 log = logging.getLogger("autocontent")
+use_system_trust()
 
 
 def run_migrations() -> None:

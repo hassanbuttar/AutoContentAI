@@ -153,8 +153,11 @@ def post_content(db: Session, pub: PublicationRecord, video: RenderedVideo) -> P
 
 def _ctx(db: Session, pub: PublicationRecord, account: SocialAccount, video: RenderedVideo, tokens: TokenSet,
          progress=lambda m: None) -> PublishContext:
+    state = dict(pub.platform_state or {})
+
     def save_state(patch: dict) -> None:
         # committed immediately so a crash after this point leaves evidence for verify()
+        state.update(patch)  # keep the adapter's view (ctx.state) in sync
         cur = dict(pub.platform_state or {})
         cur.update(patch)
         pub.platform_state = cur
@@ -170,7 +173,7 @@ def _ctx(db: Session, pub: PublicationRecord, account: SocialAccount, video: Ren
     return PublishContext(video_path=storage_path(video.path), video_meta={"width": video.width, "height": video.height,
                           "duration": video.duration, "size_bytes": video.size_bytes, "fps": video.fps},
                           post=post_content(db, pub, video), tokens=tokens, account_settings=account_settings(db, account),
-                          state=dict(pub.platform_state or {}), save_state=save_state, progress=progress,
+                          state=state, save_state=save_state, progress=progress,
                           public_url=public_url if base else None)
 
 

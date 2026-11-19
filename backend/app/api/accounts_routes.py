@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 
 from app.api.deps import (AuthUser, Depends, Session, User, get_db, get_or_404, iso, ser_account, ser_pub, ser_rule,
@@ -134,6 +135,37 @@ def oauth_callback(platform: str, state: str = Query(""), code: str = Query(""),
         db.commit()
         return RedirectResponse(f"/accounts?oauth=error&account={account_id}&reason=exchange_failed", status_code=302)
     return RedirectResponse(f"/accounts?oauth=connected&account={account_id}", status_code=302)
+
+
+class TokenConnectIn(BaseModel):
+    access_token: str = Field(min_length=20, max_length=2000)
+
+
+@router.post("/accounts/{account_id}/token-connect")
+def token_connect(account_id: int, body: TokenConnectIn, user: User = AuthUser, db: Session = Depends(get_db)):
+    """Connect with a token from the platform's developer tools (e.g. Meta Graph API Explorer). The token is
+    exchanged for a long-lived one, stored encrypted, and never returned."""
+    a = get_or_404(db, SocialAccount, account_id)
+    if a.platform == "export":
+        raise HTTPException(400, "Export accounts do not connect")
+    adapter = get_adapter(a.platform)
+    settings = pubsvc.account_settings(db, a)
+    try:
+        tokens = adapter.connect_with_token(pubsvc.oauth_client(db, a.platform), body.access_token.strip(), settings)
+        info = adapter.account_info(tokens, settings)
+    except (PublishError, NotConfigured) as exc:
+        a.last_error = f"Token connect failed: {exc}"[:1000]
+        db.commit()
+        raise HTTPException(400, str(exc)) from exc
+    pubsvc.save_tokens(db, a, tokens)
+    a.external_account_id = info.get("external_account_id")
+    if info.get("display_name"):
+        a.settings = {**(a.settings or {}), "platform_display_name": info["display_name"]}
+    a.capabilities = adapter.capabilities(settings)
+    a.last_error = None
+    audit(db, "account.token_connected", user.id, "account", a.id, {"platform": a.platform})
+    db.commit()
+    return ser_account(a, _caps(db, a))
 
 
 @router.post("/accounts/{account_id}/disconnect")
