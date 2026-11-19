@@ -1,0 +1,14 @@
+# Optional. The native install is the primary path on Windows 11 (GPU, SAPI voices, ComfyUI on the host).
+services:
+  autocontent:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"   # bound to localhost only
+    volumes:
+      - ./storage:/data
+      - ${PROJECTS_DIR:-./projects}:/projects:ro   # then add /projects as an allowed project folder
+    environment:
+      AUTOCONTENT_MASTER_KEY: ${AUTOCONTENT_MASTER_KEY:?set a Fernet key - containers have no OS keychain}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

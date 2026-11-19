@@ -1,0 +1,46 @@
+{
+  "name": "Wan 2.1 I2V 480p — animate scene still (img2vid)",
+  "description": "Animates a generated still with Wan 2.1 image-to-video (14B fp8). Slow on laptop GPUs (several minutes per clip); enable via Settings → ComfyUI → 'Animate stills'. CLIP-vision conditioning is omitted because no CLIP-vision model is installed; add a CLIPVisionLoader + CLIPVisionEncode to improve fidelity.",
+  "kind": "img2vid",
+  "output_type": "video",
+  "is_default": true,
+  "timeout_seconds": 1500,
+  "enabled": true,
+  "defaults": {
+    "width": 480,
+    "height": 832,
+    "length": 49,
+    "steps": 20,
+    "negative_prompt": "static, blurry, distorted, text, watermark, low quality, flicker"
+  },
+  "mappings": {
+    "positive_prompt": {"node": "4", "input": "text"},
+    "negative_prompt": {"node": "5", "input": "text"},
+    "input_image": {"node": "6", "input": "image"},
+    "seed": {"node": "9", "input": "seed"},
+    "width": {"node": "7", "input": "width"},
+    "height": {"node": "7", "input": "height"},
+    "length": {"node": "7", "input": "length"},
+    "steps": {"node": "9", "input": "steps"},
+    "filename_prefix": {"node": "11", "input": "filename_prefix"}
+  },
+  "workflow": {
+    "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "wan2.1_i2v_480p_14B_fp8_scaled.safetensors", "weight_dtype": "default"}},
+    "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan"}},
+    "3": {"class_type": "VAELoader", "inputs": {"vae_name": "wan_2.1_vae.safetensors"}},
+    "4": {"class_type": "CLIPTextEncode", "inputs": {"text": "smooth slow camera push-in, subtle motion", "clip": ["2", 0]}},
+    "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "static, blurry, distorted", "clip": ["2", 0]}},
+    "6": {"class_type": "LoadImage", "inputs": {"image": "example.png"}},
+    "7": {"class_type": "WanImageToVideo", "inputs": {"positive": ["4", 0], "negative": ["5", 0], "vae": ["3", 0],
+                                                     "width": 480, "height": 832, "length": 49, "batch_size": 1,
+                                                     "start_image": ["6", 0]}},
+    "8": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": 8.0}},
+    "9": {"class_type": "KSampler", "inputs": {"model": ["8", 0], "seed": 7, "steps": 20, "cfg": 5.0, "sampler_name": "uni_pc",
+                                               "scheduler": "simple", "positive": ["7", 0], "negative": ["7", 1],
+                                               "latent_image": ["7", 2], "denoise": 1.0}},
+    "10": {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["3", 0]}},
+    "11": {"class_type": "VHS_VideoCombine", "inputs": {"images": ["10", 0], "frame_rate": 16, "loop_count": 0,
+                                                        "filename_prefix": "autocontent/anim", "format": "video/h264-mp4",
+                                                        "pingpong": false, "save_output": true}}
+  }
+}
