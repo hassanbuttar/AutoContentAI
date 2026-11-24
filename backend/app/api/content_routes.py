@@ -18,6 +18,8 @@ from app.services.ai.schemas import ContentPlan, SceneIn
 from app.services.audit import audit
 from app.services.content import claims as claim_check
 from app.services.publishing.service import check_public_media_token
+from app.services.storage_cleanup import remove_files
+from app.services.video import library
 from app.workers import queue as q
 from app.workers.queue import enqueue
 
@@ -92,6 +94,8 @@ def edit_script(script_id: int, body: ScriptPatch, user: User = AuthUser, db: Se
         except Exception:
             pass
     s.edited = True
+    if body.social_content is not None:
+        library.refresh_caption_qc(db, s)  # e.g. an import that only failed for an empty caption becomes ready
     db.commit()
     return _script_detail(db, s)
 
@@ -150,6 +154,7 @@ IMPORT_MAX_BYTES = 1024 * 1024 * 1024
 @router.post("/applications/{app_id}/videos/import", status_code=201)
 async def import_video(app_id: int, file: UploadFile = File(...), title: str = Form(""), caption: str = Form(""),
                        hashtags: str = Form(""), youtube_title: str = Form(""), fit: str = Form("auto"),
+                       ai_generated: bool = Form(False),
                        user: User = AuthUser, db: Session = Depends(get_db)):
     """Bring a finished video made elsewhere into the library (conformed to 9:16 if needed, QC'd, deduplicated)."""
     import re
@@ -175,15 +180,20 @@ async def import_video(app_id: int, file: UploadFile = File(...), title: str = F
                 fh.write(chunk)
         tags = [t for t in re.split(r"[\s,]+", hashtags) if t.strip("#")]
         try:
-            video = await run_in_threadpool(importer.import_video, db, app, tmp, original_name=file.filename or "upload",
-                                            title=title, caption=caption, hashtags=tags, youtube_title=youtube_title, fit=fit)
+            res = await run_in_threadpool(importer.import_video, db, app, tmp, original_name=file.filename or "upload",
+                                          title=title, caption=caption, hashtags=tags, youtube_title=youtube_title, fit=fit,
+                                          ai_generated=ai_generated)
         except importer.DuplicateVideo as exc:
-            raise HTTPException(409, str(exc)) from exc
+            # Structured so the dashboard can open the existing copy instead of leaving the user stuck.
+            raise HTTPException(409, {"message": f"{exc}. Opening it.", "video_id": exc.video_id}) from exc
         except importer.ImportProblem as exc:
             raise HTTPException(400, str(exc)) from exc
-        audit(db, "video.import", user.id, "video", video.id, {"name": (file.filename or "")[:200], "renderer": video.renderer})
+        video = res.video
+        audit(db, "video.import", user.id, "video", video.id, {"name": (file.filename or "")[:200], "renderer": video.renderer,
+                                                              "replaced_video_id": res.replaced_video_id})
         db.commit()
-        return ser_video(video)
+        remove_files(db, res.stale_files)
+        return {**ser_video(video), "replaced_video_id": res.replaced_video_id}
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -250,19 +260,15 @@ def review_video(video_id: int, decision: str, user: User = AuthUser, db: Sessio
 @router.delete("/videos/{video_id}")
 def delete_video(video_id: int, user: User = AuthUser, db: Session = Depends(get_db)):
     v = get_or_404(db, RenderedVideo, video_id)
-    if db.scalar(select(PublicationRecord.id).where(PublicationRecord.rendered_video_id == v.id,
-                                                    PublicationRecord.status.in_(["published", "publishing"]))):
+    if library.is_published(db, v):
         raise HTTPException(409, "Video has been published; it is kept for history")
-    for rel in (v.path, v.thumbnail_path):
-        if rel:
-            storage_path(rel).unlink(missing_ok=True)
-    for p in db.scalars(select(PublicationRecord).where(PublicationRecord.rendered_video_id == v.id)):
-        p.rendered_video_id = None
-        if p.status in ("awaiting_approval", "approved"):
-            p.status = "planned"
-    db.delete(v)
+    # Database first, files second: on Windows the file may still be open (the dashboard's player streaming it),
+    # which used to raise WinError 32 -> HTTP 500 with nothing deleted. Locked files are retried by a cleanup job.
+    files = library.delete_video_record(db, v)
+    audit(db, "video.delete", user.id, "video", video_id)
     db.commit()
-    return {"ok": True}
+    pending = remove_files(db, files)
+    return {"ok": True, "files_pending": len(pending)}
 
 
 # ------------------------------------------------------------------ publications (queue)

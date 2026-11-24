@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { CheckCircle2, Clapperboard, Download, Send, ThumbsDown, ThumbsUp, Trash2, Upload, XCircle } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { useAction, useApi, useToast } from "@/lib/hooks";
 import { fmtBytes, fmtRelative, PLATFORM_LABEL } from "@/lib/utils";
 import {
@@ -21,7 +21,7 @@ function ImportDialog({ open, onClose, apps, defaultApp, onImported }: {
   const input = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
-  const [f, setF] = useState({ app: "", title: "", caption: "", hashtags: "", youtube_title: "", fit: "auto" });
+  const [f, setF] = useState({ app: "", title: "", caption: "", hashtags: "", youtube_title: "", fit: "auto", ai: false });
   useEffect(() => {
     if (open) setF((x) => ({ ...x, app: defaultApp || x.app || String(apps[0]?.id ?? "") }));
   }, [open, defaultApp, apps]);
@@ -37,18 +37,29 @@ function ImportDialog({ open, onClose, apps, defaultApp, onImported }: {
     const fd = new FormData();
     fd.append("file", file);
     (["title", "caption", "hashtags", "youtube_title", "fit"] as const).forEach((k) => fd.append(k, f[k]));
+    fd.append("ai_generated", String(f.ai));
     setBusy(true);
     try {
       const v: any = await api.upload(`/api/applications/${f.app}/videos/import`, fd);
       const ok = v.status === "ready";
-      toast(ok ? "Video imported" : "Imported, but it failed QC: see Quality checks", ok ? "success" : "error");
+      const replaced = v.replaced_video_id ? ` (replaced the earlier failed/rejected copy #${v.replaced_video_id})` : "";
+      toast(ok ? `Video imported${replaced}` : `Imported${replaced}, but it failed QC: see Quality checks`, ok ? "success" : "error");
       qc.invalidateQueries({ queryKey: ["videos"] });
       setFile(null);
       setF((s) => ({ ...s, title: "", caption: "", hashtags: "", youtube_title: "" }));
       onClose();
       onImported(v.id);
     } catch (err: any) {
-      toast(err.message, "error");
+      if (err instanceof ApiError && err.status === 409 && err.data?.video_id) {
+        // Same video already in the library and usable: take the user to it instead of a dead end.
+        toast(err.message, "info");
+        qc.invalidateQueries({ queryKey: ["videos"] });
+        setFile(null);
+        onClose();
+        onImported(err.data.video_id);
+      } else {
+        toast(err.message, "error");
+      }
     } finally {
       setBusy(false);
     }
@@ -88,6 +99,8 @@ function ImportDialog({ open, onClose, apps, defaultApp, onImported }: {
             </Select>
           </Field>
         </div>
+        <Switch checked={f.ai} onChange={(x) => setF({ ...f, ai: x })}
+          label="Contains realistic AI-generated people or scenes (sets the AI label on Instagram, TikTok and YouTube)" />
         <Button type="submit" disabled={!file || !f.app} loading={busy}>{busy ? "Importing and checking…" : "Import video"}</Button>
       </form>
     </Dialog>
@@ -131,7 +144,15 @@ function VideoDetail({ id, onClose }: { id: number; onClose: () => void }) {
   const [sched, setSched] = useState({ account: "", when: "", approve: true });
   const inv = [["videos"], ["video", id], ["publications"]];
   const review = useAction((d: string) => api.post(`/api/videos/${id}/review?decision=${d}`), inv, "Review saved");
+  const player = useRef<HTMLVideoElement>(null);
   const del = useAction(() => api.del(`/api/videos/${id}`), [["videos"]], "Video deleted");
+  const remove = async () => {
+    if (!confirm("Delete this video and its file?")) return;
+    // Stop streaming first so the browser releases the file (Windows refuses to delete open files).
+    const el = player.current;
+    if (el) { el.pause(); el.removeAttribute("src"); el.load(); }
+    try { await del.mutateAsync(); onClose(); } catch { /* toast shown by useAction */ }
+  };
   const schedule = useAction(() => api.post("/api/publications", {
     video_id: id, social_account_id: Number(sched.account), approve: sched.approve,
     scheduled_for: sched.when ? new Date(sched.when).toISOString() : null,
@@ -142,13 +163,13 @@ function VideoDetail({ id, onClose }: { id: number; onClose: () => void }) {
   return (
     <div className="grid gap-6 lg:grid-cols-5">
       <div className="lg:col-span-2">
-        {v.url ? <video src={v.url} controls autoPlay className="mx-auto aspect-[9/16] w-full max-w-xs rounded-xl bg-black" />
+        {v.url ? <video ref={player} src={v.url} controls autoPlay className="mx-auto aspect-[9/16] w-full max-w-xs rounded-xl bg-black" />
           : <div className="flex aspect-[9/16] items-center justify-center rounded-xl bg-muted">{v.status}</div>}
         <div className="mt-3 flex flex-wrap justify-center gap-2">
           <Button size="sm" variant="success" disabled={v.status !== "ready"} onClick={() => review.mutate("approved")}><ThumbsUp /> Approve</Button>
           <Button size="sm" variant="outline" onClick={() => review.mutate("rejected")}><ThumbsDown /> Reject</Button>
           {v.url && <a href={`${v.url}?download=true`}><Button size="sm" variant="outline"><Download /> Download</Button></a>}
-          <Button size="sm" variant="ghost" onClick={async () => { if (confirm("Delete this video file?")) { await del.mutateAsync(); onClose(); } }}><Trash2 /></Button>
+          <Button size="sm" variant="ghost" loading={del.isPending} onClick={remove} aria-label="Delete video"><Trash2 /></Button>
         </div>
         <div className="mt-4 space-y-1 text-xs text-muted-foreground">
           <p>{v.width}×{v.height} · {v.fps} fps · {v.duration}s · {fmtBytes(v.size_bytes)}</p>

@@ -25,6 +25,7 @@ JOB_TYPES: dict[str, tuple[str, int]] = {
     "fetch_metrics": ("default", 2),
     "refresh_tokens": ("default", 2),
     "backup": ("default", 1),
+    "cleanup_files": ("default", 10),  # retries deleting files Windows had locked (backoff up to 1 h)
 }
 
 

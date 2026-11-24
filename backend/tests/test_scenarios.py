@@ -496,16 +496,41 @@ def test_import_external_video_conforms_qcs_and_publishes_like_generated(client,
     assert r.status_code == 201, r.text
     v = r.json()
     assert v["status"] == "ready" and v["renderer"] == "imported+conformed"
-    assert (v["width"], v["height"]) == (1080, 1920) and abs(v["fps"] - 30) < 1
+    assert (v["width"], v["height"]) == (1080, 1920) and abs(v["fps"] - 25) < 1  # standard rates are kept
     assert v["qc_report"]["ok"], v["qc_report"]
     d = client.get(f"/api/videos/{v['id']}").json()
     ig = d["script"]["social_content"]["instagram"]
     assert ig["caption"] == "Pack outfits, not possibilities." and ig["hashtags"] == ["#travel", "#packing", "#Stylwear"]
     assert d["script"]["social_content"]["youtube"]["title"] == "Packing demo"
+    # an already-compliant 25 fps vertical file is copied untouched (no re-encode) and keeps the AI flag
+    ready = env["tmp"] / "ready.mp4"
+    ffmpeg.run(["-f", "lavfi", "-i", "testsrc2=size=1080x1920:rate=25:duration=4", "-f", "lavfi", "-i",
+                "sine=frequency=330:duration=4", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+                str(ready)])
+    with open(ready, "rb") as fh:
+        rr = client.post(f"/api/applications/{a['id']}/videos/import", data={**form, "ai_generated": "true"},
+                         files={"file": ("ready.mp4", fh, "video/mp4")})
+    assert rr.status_code == 201, rr.text
+    assert rr.json()["renderer"] == "imported" and rr.json()["qc_report"]["ok"], rr.json()["qc_report"]
+    import hashlib
+
+    from app.core.db import SessionLocal
+    from app.models import RenderedVideo, VideoScript
+    from app.services.publishing.service import post_content
+
+    with SessionLocal() as s:
+        rv = s.get(RenderedVideo, rr.json()["id"])
+        assert rv.sha256 == hashlib.sha256(ready.read_bytes()).hexdigest()
+        assert s.get(VideoScript, rv.video_script_id).plan_json["imported"]["ai_generated"] is True
+
+        class _Pub:
+            platform, caption, hashtags, title = "tiktok", None, None, None
+        assert post_content(s, _Pub(), rv).ai_generated_visuals is True
     # same source again -> identical conformed output -> duplicate
     with open(src, "rb") as fh:
         r2 = client.post(f"/api/applications/{a['id']}/videos/import", data=form, files={"file": ("demo.mp4", fh, "video/mp4")})
-    assert r2.status_code == 409
+    assert r2.status_code == 409  # the first copy is usable (ready, pending review): don't import it twice
+    assert r2.json()["detail"]["video_id"] == v["id"]  # the dashboard opens the existing copy
     # not a video
     r3 = client.post(f"/api/applications/{a['id']}/videos/import", data=form, files={"file": ("x.mp4", b"not a video" * 50, "video/mp4")})
     assert r3.status_code == 400
@@ -515,3 +540,114 @@ def test_import_external_video_conforms_qcs_and_publishes_like_generated(client,
     p = client.post("/api/publications", json={"video_id": v["id"], "social_account_id": acc["id"], "approve": True})
     assert p.status_code == 201, p.text
     assert p.json()["caption"] == "Pack outfits, not possibilities."
+
+
+def _import(client, app_id: int, path, **form):
+    with open(path, "rb") as fh:
+        return client.post(f"/api/applications/{app_id}/videos/import", data=form,
+                           files={"file": (path.name, fh, "video/mp4")})
+
+
+def _clip(env, name: str, freq: int = 440):
+    from app.services.video import ffmpeg
+
+    p = env["tmp"] / name
+    ffmpeg.run(["-f", "lavfi", "-i", "testsrc2=size=1080x1920:rate=25:duration=3", "-f", "lavfi", "-i",
+                f"sine=frequency={freq}:duration=3", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-shortest", str(p)])
+    return p
+
+
+def test_import_without_caption_is_usable_and_caption_edit_rechecks_qc(client, env):
+    """Root cause 1: an import without a caption was marked `failed` ("all captions are empty") and editing the
+    caption later never re-ran QC, so the video could never be approved."""
+    a = client.post("/api/applications", json={"name": "Stylwear"}).json()
+    r = _import(client, a["id"], _clip(env, "nocap.mp4"))
+    assert r.status_code == 201, r.text
+    v = r.json()
+    assert v["status"] == "ready"  # usable; the empty caption is a warning to fix before publishing
+    desc = next(c for c in v["qc_report"]["checks"] if c["name"] == "description")
+    assert not desc["ok"] and desc["severity"] == "warning"
+    assert v["qc_report"]["auto_publish_ok"] is False  # semi/auto modes still hold it for review
+    sid = client.get(f"/api/videos/{v['id']}").json()["script"]["id"]
+    client.put(f"/api/scripts/{sid}", json={"social_content": {"instagram": {"caption": "Dress with intention."}}})
+    v2 = client.get(f"/api/videos/{v['id']}").json()
+    assert v2["status"] == "ready" and v2["qc_report"]["auto_publish_ok"] is True
+    assert "description" not in v2["qc_report"]["flags"]
+
+    # A video saved by the old code as `failed` only because of the caption becomes ready once one is added.
+    from app.core.db import SessionLocal
+    from app.models import RenderedVideo
+
+    with SessionLocal() as s:
+        rv = s.get(RenderedVideo, v["id"])
+        rep = dict(rv.qc_report)
+        rep["checks"] = [{**c, "ok": False, "severity": "error", "detail": "all captions are empty"}
+                         if c["name"] == "description" else c for c in rep["checks"]]
+        rv.qc_report, rv.status, rv.error = {**rep, "ok": False}, "failed", "Failed QC: description"
+        s.commit()
+    client.put(f"/api/scripts/{sid}", json={"social_content": {"tiktok": {"caption": "Try it free."}}})
+    assert client.get(f"/api/videos/{v['id']}").json()["status"] == "ready"
+
+
+def test_reimport_replaces_a_rejected_or_failed_copy(client, env):
+    """Root cause 2: the duplicate check refused a re-upload even when the existing copy was failed/rejected,
+    and that copy could not be deleted either, so the user was stuck."""
+    a = client.post("/api/applications", json={"name": "Stylwear"}).json()
+    clip = _clip(env, "ad.mp4")
+    first = _import(client, a["id"], clip).json()
+    assert client.post(f"/api/videos/{first['id']}/review?decision=rejected").status_code == 200
+    r = _import(client, a["id"], clip, caption="Second try, with a caption.")
+    assert r.status_code == 201, r.text
+    second = r.json()
+    assert second["replaced_video_id"] == first["id"]  # (SQLite may hand the freed id to the new row)
+    lib = client.get(f"/api/videos?application_id={a['id']}").json()
+    assert [x["id"] for x in lib] == [second["id"]] and lib[0]["review_status"] == "pending"
+    ig = client.get(f"/api/videos/{second['id']}").json()["script"]["social_content"]["instagram"]
+    assert ig["caption"] == "Second try, with a caption."
+
+
+def test_delete_video_while_file_is_locked(client, env, monkeypatch):
+    """Root cause 3: on Windows the dashboard's player keeps the MP4 open; unlink raised WinError 32 and the
+    DELETE returned 500 with nothing deleted. Now the record is removed and the file is retried by a job."""
+    import pathlib
+
+    from sqlalchemy import select as sel
+
+    from app.core.db import SessionLocal
+    from app.core.paths import storage_path
+    from app.models import ContentIdea, RenderedVideo, ScheduledJob, VideoScript
+
+    a = client.post("/api/applications", json={"name": "Stylwear"}).json()
+    v = _import(client, a["id"], _clip(env, "locked.mp4")).json()
+    with SessionLocal() as s:
+        rv = s.get(RenderedVideo, v["id"])
+        video_file, script_id, idea_id = storage_path(rv.path), rv.video_script_id, rv.content_idea_id
+    real_unlink = pathlib.Path.unlink
+
+    def locked_unlink(self, missing_ok=False):
+        if self.resolve() == video_file.resolve():
+            raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", locked_unlink)
+    r = client.delete(f"/api/videos/{v['id']}")
+    assert r.status_code == 200, r.text
+    assert r.json()["files_pending"] == 1
+    assert client.get(f"/api/videos/{v['id']}").status_code == 404
+    assert video_file.exists()
+    with SessionLocal() as s:
+        assert s.get(VideoScript, script_id) is None and s.get(ContentIdea, idea_id) is None  # no orphans
+        job = s.scalar(sel(ScheduledJob).where(ScheduledJob.job_type == "cleanup_files"))
+        assert job is not None and job.payload["paths"]
+        job_id = job.id
+    from app.workers.queue import RetryableError  # noqa: F401  (still locked -> retried, not failed)
+
+    assert run_job(job_id).status == "retry_wait"
+    monkeypatch.setattr(pathlib.Path, "unlink", real_unlink)  # the player let go of the file
+    from app.workers import queue as q
+
+    with SessionLocal() as s:
+        q.retry_now(s, s.get(ScheduledJob, job_id))
+    assert run_job(job_id).status == "succeeded"
+    assert not video_file.exists()

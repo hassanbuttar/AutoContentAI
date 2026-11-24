@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+from dataclasses import dataclass, field
 import time
 import uuid
 from datetime import datetime
@@ -19,10 +20,15 @@ from app.core.config import get_settings
 from app.core.paths import to_storage_rel
 from app.models import Application, ContentIdea, RenderedVideo, VideoScript
 from app.services.settings_service import effective_video_settings
-from app.services.video import ffmpeg, qc
+from app.services.video import ffmpeg, library, qc
 
 FIT_MODES = ("auto", "pad", "crop")
 IMPORT_MAX_DURATION = 180.0  # longest clip every supported platform accepts through its API (Shorts / Reels)
+FPS_RANGE = (23.9, 60.5)  # standard rates (24/25/30/50/60) are kept as-is; anything else is converted to the target
+
+
+def _out_fps(pr: ffmpeg.ProbeResult, vs: dict) -> float:
+    return pr.fps if FPS_RANGE[0] <= pr.fps <= FPS_RANGE[1] else float(vs["fps"])
 
 
 class ImportProblem(ValueError):
@@ -30,19 +36,28 @@ class ImportProblem(ValueError):
 
 
 class DuplicateVideo(ImportProblem):
+    """The identical video is already in the library and still usable (ready, not rejected)."""
+
     def __init__(self, video_id: int):
-        super().__init__(f"This exact file is already in the library (video #{video_id})")
+        super().__init__(f"This exact video is already in the library as video #{video_id}")
         self.video_id = video_id
+
+
+@dataclass
+class ImportResult:
+    video: RenderedVideo
+    replaced_video_id: int | None = None  # an earlier failed/rejected copy of the same file that was removed
+    stale_files: list[str] = field(default_factory=list)  # delete after commit (storage_cleanup.remove_files)
 
 
 def _compliant(pr: ffmpeg.ProbeResult, vs: dict) -> bool:
     return ((pr.width, pr.height) == (int(vs["width"]), int(vs["height"])) and pr.vcodec == "h264" and pr.acodec == "aac"
-            and pr.pix_fmt == "yuv420p" and abs(pr.fps - float(vs["fps"])) < 1.0)
+            and pr.pix_fmt == "yuv420p" and FPS_RANGE[0] <= pr.fps <= FPS_RANGE[1])
 
 
 def _conform(src: Path, dest: Path, pr: ffmpeg.ProbeResult, vs: dict, fit: str) -> None:
-    W, H, FPS, crf = int(vs["width"]), int(vs["height"]), int(vs["fps"]), int(vs.get("crf", 20))
-    tail = f"fps={FPS},format=yuv420p,setsar=1"
+    W, H, crf = int(vs["width"]), int(vs["height"]), int(vs.get("crf", 20))
+    tail = f"fps={_out_fps(pr, vs):g},format=yuv420p,setsar=1"
     if fit == "crop":
         vf = f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},{tail}[v]"
     else:  # pad: fit inside, fill the rest with a blurred copy (no black bars)
@@ -58,8 +73,15 @@ def _conform(src: Path, dest: Path, pr: ffmpeg.ProbeResult, vs: dict, fit: str) 
 
 
 def import_video(db: Session, app: Application, src: Path, *, original_name: str, title: str, caption: str,
-                 hashtags: list[str], youtube_title: str = "", fit: str = "auto") -> RenderedVideo:
-    """`src` is a temporary file owned by the caller; it is never modified."""
+                 hashtags: list[str], youtube_title: str = "", fit: str = "auto",
+                 ai_generated: bool = False) -> ImportResult:
+    """`src` is a temporary file owned by the caller; it is never modified.
+
+    `ai_generated`: the video shows realistic AI-generated people/scenes; sets the platforms' AI-content
+    disclosure where their API supports it (Instagram is_ai_generated, TikTok is_aigc, YouTube containsSyntheticMedia).
+
+    Re-importing a file whose earlier copy failed QC or was rejected replaces that copy instead of refusing, so a
+    bad first attempt can never block the file; a usable copy raises DuplicateVideo (the caller can open it)."""
     if fit not in FIT_MODES:
         raise ImportProblem(f"fit must be one of {', '.join(FIT_MODES)}")
     try:
@@ -76,21 +98,28 @@ def import_video(db: Session, app: Application, src: Path, *, original_name: str
     final = out_dir / f"{datetime.now():%Y%m%d_%H%M%S}_import_{uuid.uuid4().hex[:6]}.mp4"
     t0 = time.monotonic()
     normalized = not _compliant(pr, vs)
+    thumb: Path | None = None
+    replaced_id, stale = None, []
     try:
         if normalized:
             _conform(src, final, pr, vs, "pad" if fit == "auto" else fit)
         else:
             shutil.copyfile(src, final)
         sha = hashlib.sha256(final.read_bytes()).hexdigest()
-        dup = db.scalar(select(RenderedVideo.id).where(RenderedVideo.application_id == app.id, RenderedVideo.sha256 == sha))
-        if dup:
-            raise DuplicateVideo(dup)
+        dup = db.scalar(select(RenderedVideo).where(RenderedVideo.application_id == app.id, RenderedVideo.sha256 == sha))
+        if dup is not None:
+            if not library.is_replaceable(db, dup):
+                raise DuplicateVideo(dup.id)
+            replaced_id = dup.id
+            stale = library.delete_video_record(db, dup)  # frees the (application, sha256) unique key
         thumb = get_settings().storage("thumbnails", app.slug) / (final.stem + ".jpg")
         ffmpeg.run(["-ss", str(min(1.0, pr.duration / 2)), "-i", str(final), "-frames:v", "1", "-vf", "scale=540:-2",
                     "-q:v", "3", str(thumb)])
         out = ffmpeg.probe(final)
     except Exception:
         final.unlink(missing_ok=True)
+        if thumb is not None:
+            thumb.unlink(missing_ok=True)
         raise
 
     title = title.strip() or Path(original_name).stem[:200] or "Imported video"
@@ -106,11 +135,13 @@ def import_video(db: Session, app: Application, src: Path, *, original_name: str
                          language=app.language or "en", duration_seconds=round(out.duration, 2), social_content=social,
                          claim_check={"ok": True, "errors": 0, "warnings": 0, "issues": [], "imported": True},
                          plan_json={"imported": {"original_name": original_name[:300], "source": pr.as_dict(),
-                                                 "normalized": normalized, "fit": fit}})
+                                                 "normalized": normalized, "fit": fit,
+                                                 "ai_generated": bool(ai_generated)}})
     db.add(script)
     db.flush()
-    report = qc.check_video(out, {**vs, "min_duration": 3, "max_duration": IMPORT_MAX_DURATION}, script,
-                            captions_enabled=False)
+    report = qc.check_video(out, {**vs, "fps": round(_out_fps(pr, vs)), "min_duration": 3,
+                                  "max_duration": IMPORT_MAX_DURATION}, script,
+                            captions_enabled=False, caption_required=False)
     for c in report["checks"]:
         if c["name"] == "captions":
             c["detail"] = "burned-in captions are up to the source video"
@@ -122,7 +153,8 @@ def import_video(db: Session, app: Application, src: Path, *, original_name: str
                           height=out.height, fps=out.fps, duration=round(out.duration, 2), size_bytes=out.size_bytes,
                           sha256=sha, renderer="imported+conformed" if normalized else "imported", qc_report=report,
                           render_seconds=round(time.monotonic() - t0, 1),
-                          error=None if report["ok"] else "Failed QC: " + ", ".join(report["flags"]))
+                          error=None if report["ok"] else "Failed QC: " + ", ".join(
+                              c["name"] for c in report["checks"] if not c["ok"] and c["severity"] == "error"))
     db.add(video)
     db.flush()
-    return video
+    return ImportResult(video, replaced_id, stale)

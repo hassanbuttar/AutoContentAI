@@ -1,9 +1,11 @@
 // Thin fetch wrapper: cookie session, CSRF header, JSON errors surfaced as ApiError.
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  data: any; // structured `detail` from the server, e.g. { message, video_id } on a duplicate import
+  constructor(status: number, message: string, data: any = null) {
     super(message);
     this.status = status;
+    this.data = data;
   }
 }
 
@@ -21,15 +23,19 @@ async function request<T>(method: string, url: string, body?: unknown, isForm = 
   }
   if (!res.ok) {
     let msg = res.statusText;
+    let detail: any = null;
     try {
       const data = await res.json();
+      detail = data.detail;
       if (typeof data.detail === "string") msg = data.detail;
       else if (Array.isArray(data.detail))
         msg = data.detail.map((d: any) => `${(d.loc || []).slice(1).join(".")}: ${d.msg}`).join("; ");
+      else if (data.detail && typeof data.detail.message === "string") msg = data.detail.message;
     } catch {
       /* not json */
     }
-    throw new ApiError(res.status, msg);
+    if (res.status >= 500 && msg === res.statusText) msg = `Server error (${res.status}). Check Execution Logs.`;
+    throw new ApiError(res.status, msg, detail);
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;

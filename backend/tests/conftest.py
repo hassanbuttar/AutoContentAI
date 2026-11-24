@@ -23,6 +23,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTOCONTENT_MASTER_KEY", "nC3m0Qq8yQ6s0y8b8m3QyF4o5nq4Tm1lQ0b2Z7cJxkU=")
     from app.core import config, db, secrets
 
+    # Ignore the developer's real .env (e.g. AUTOCONTENT_COOKIE_SECURE=true would break the http test client).
+    monkeypatch.setitem(config.Settings.model_config, "env_file", None)
     config.get_settings.cache_clear()
     secrets.reset_for_tests()
     db.init_engine()

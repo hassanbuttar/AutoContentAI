@@ -148,6 +148,10 @@ class InstagramAdapter(PlatformAdapter):
         p = self.http.get(f"{g}/{media_id}", params={"fields": "permalink", "access_token": ctx.tokens.access_token})
         if p.status_code == 200:
             url = p.json().get("permalink")
+        if ctx.post.ai_generated_visuals:  # record whether Meta actually applied the AI label (informational)
+            a = self.http.get(f"{g}/{media_id}", params={"fields": "is_ai_generated", "access_token": ctx.tokens.access_token})
+            if a.status_code == 200:
+                ctx.save_state({"ai_label": bool(a.json().get("is_ai_generated"))})
         return PublishResult("published", media_id, url)
 
     def publish(self, ctx: PublishContext) -> PublishResult:
@@ -166,6 +170,8 @@ class InstagramAdapter(PlatformAdapter):
                 ctx.save_state({"uploaded": True})
         if not container:
             params = {"media_type": "REELS", "caption": ctx.post.caption_with_tags(2200), "share_to_feed": "true", "access_token": tok}
+            if ctx.post.ai_generated_visuals:  # "AI info" label (Content Publishing API, June 2026 changelog)
+                params["is_ai_generated"] = "true"
             if not resumable:
                 if not ctx.public_url:
                     raise PublishError("Instagram Login requires a public video URL; set AUTOCONTENT_PUBLIC_BASE_URL or use the facebook_login variant")

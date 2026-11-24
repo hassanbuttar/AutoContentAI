@@ -148,7 +148,8 @@ def post_content(db: Session, pub: PublicationRecord, video: RenderedVideo) -> P
     hashtags = pub.hashtags or pc.get("hashtags") or (sc.get("instagram") or {}).get("hashtags") or []
     return PostContent(title=pub.title or yt.get("title") or (script.hook if script else "")[:100], caption=caption,
                        hashtags=hashtags, description=yt.get("description") or caption, tags=yt.get("tags") or [],
-                       ai_generated_visuals="comfyui" in (video.renderer or ""))
+                       ai_generated_visuals="comfyui" in (video.renderer or "")
+                       or bool(((script.plan_json or {}).get("imported") or {}).get("ai_generated") if script else False))
 
 
 def _ctx(db: Session, pub: PublicationRecord, account: SocialAccount, video: RenderedVideo, tokens: TokenSet,

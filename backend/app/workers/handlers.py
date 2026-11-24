@@ -270,8 +270,18 @@ def h_backup(job: ScheduledJob, ctx: JobContext) -> dict:
     return run_backup()
 
 
+def h_cleanup_files(job: ScheduledJob, ctx: JobContext) -> dict:
+    from app.services.storage_cleanup import try_remove
+
+    paths = list((job.payload or {}).get("paths", []))
+    left = try_remove(paths)
+    if left:
+        raise RetryableError(f"{len(left)} file(s) still in use: {', '.join(left)[:300]}")
+    return {"removed": len(paths)}
+
+
 HANDLERS = {"analyze_application": h_analyze, "prepare_content": h_prepare, "plan_content": h_plan, "render_video": h_render,
             "publish": h_publish, "verify_publication": h_verify, "fetch_metrics": h_metrics, "refresh_tokens": h_refresh,
-            "backup": h_backup}
+            "backup": h_backup, "cleanup_files": h_cleanup_files}
 
 _ = job_log

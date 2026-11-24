@@ -155,6 +155,7 @@ def test_instagram_resumes_failed_upload_into_same_container(tmp_path):
 
     from app.services.publishing.base import PostContent, PublishContext, TokenSet
     from app.services.publishing.instagram import InstagramAdapter
+    from urllib.parse import parse_qs
 
     video = tmp_path / "v.mp4"
     video.write_bytes(b"\0" * 1000)
@@ -167,6 +168,7 @@ def test_instagram_resumes_failed_upload_into_same_container(tmp_path):
             return httpx.Response(200, json={"data": [{"quota_usage": 0, "config": {"quota_total": 100}}]})
         if path.endswith("/ig1/media"):
             calls["create"] += 1
+            calls["ai"] = parse_qs(req.content.decode()).get("is_ai_generated")
             return httpx.Response(200, json={"id": "c1", "uri": "https://rupload.facebook.com/ig-api-upload/v25.0/c1"})
         if req.url.host == "rupload.facebook.com":
             if fail_upload["on"]:
@@ -179,6 +181,8 @@ def test_instagram_resumes_failed_upload_into_same_container(tmp_path):
             calls["publish"] += 1
             return httpx.Response(200, json={"id": "m1"})
         if path.endswith("/m1"):
+            if req.url.params.get("fields") == "is_ai_generated":
+                return httpx.Response(200, json={"is_ai_generated": True})
             return httpx.Response(200, json={"permalink": "https://www.instagram.com/reel/abc/"})
         return httpx.Response(404)
 
@@ -188,7 +192,7 @@ def test_instagram_resumes_failed_upload_into_same_container(tmp_path):
         state.update(patch)
 
     def ctx():
-        return PublishContext(video_path=video, video_meta={}, post=PostContent("t", "cap", []),
+        return PublishContext(video_path=video, video_meta={}, post=PostContent("t", "cap", [], ai_generated_visuals=True),
                               tokens=TokenSet("tok", extra={"ig_user_id": "ig1"}),
                               account_settings={"variant": "facebook_login", "poll_seconds": 0},
                               state=state, save_state=save, progress=lambda m: None, public_url=None)
@@ -203,4 +207,5 @@ def test_instagram_resumes_failed_upload_into_same_container(tmp_path):
     fail_upload["on"] = False
     res = ad.publish(ctx())
     assert res.status == "published" and res.external_id == "m1"
-    assert calls == {"create": 1, "upload": 1, "publish": 1}
+    assert calls == {"create": 1, "upload": 1, "publish": 1, "ai": ["true"]}
+    assert state["ai_label"] is True

@@ -240,13 +240,13 @@ def patch_asset(asset_id: int, body: AssetPatch, user: User = AuthUser, db: Sess
 @router.delete("/assets/{asset_id}")
 def delete_asset(asset_id: int, user: User = AuthUser, db: Session = Depends(get_db)):
     x = get_or_404(db, ApplicationAsset, asset_id)
-    try:
-        storage_path(x.path).unlink(missing_ok=True)
-    except Exception:
-        pass
+    path = x.path
     db.delete(x)
     db.commit()
-    return {"ok": True}
+    from app.services.storage_cleanup import remove_files
+
+    pending = remove_files(db, [path])  # locked files are retried by a cleanup job instead of being orphaned
+    return {"ok": True, "files_pending": len(pending)}
 
 
 @router.get("/assets/{asset_id}/file")
