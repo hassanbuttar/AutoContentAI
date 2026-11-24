@@ -18,6 +18,7 @@ from app.services.ai.schemas import ContentPlan, SceneIn
 from app.services.audit import audit
 from app.services.content import claims as claim_check
 from app.services.publishing.service import check_public_media_token
+from app.services.publishing import limits
 from app.services.storage_cleanup import remove_files
 from app.services.video import library
 from app.workers import queue as q
@@ -297,6 +298,7 @@ def create_publication(body: PublicationCreate, user: User = AuthUser, db: Sessi
         raise HTTPException(400, "Video and account belong to different applications")
     if v.status != "ready":
         raise HTTPException(400, "Video is not ready")
+    _ensure_fits(v, acc)
     dup = db.scalar(select(PublicationRecord).where(PublicationRecord.rendered_video_id == v.id,
                                                     PublicationRecord.social_account_id == acc.id,
                                                     PublicationRecord.status.in_(["approved", "publishing", "published", "awaiting_approval"])))
@@ -345,6 +347,15 @@ def patch_publication(pub_id: int, body: PublicationPatch, user: User = AuthUser
     return ser_pub(p)
 
 
+def _ensure_fits(v: RenderedVideo, acc: SocialAccount | None) -> None:
+    """Refuse a platform whose size/length limits the video breaks (manual-export accounts are not limited)."""
+    if acc is None or acc.platform == "export" or acc.status == "export_only":
+        return
+    fit = limits.check_platform(acc.platform, v.duration, v.size_bytes)
+    if not fit["ok"]:
+        raise HTTPException(400, f"{limits.LIMITS[acc.platform].label} won't accept this video: {'; '.join(fit['problems'])}")
+
+
 def _transition(db: Session, p: PublicationRecord, allowed: tuple, new: str) -> None:
     if p.status not in allowed:
         raise HTTPException(409, f"Publication is {p.status}; expected one of {', '.join(allowed)}")
@@ -359,6 +370,7 @@ def approve(pub_id: int, user: User = AuthUser, db: Session = Depends(get_db)):
     v = db.get(RenderedVideo, p.rendered_video_id)
     if v.status != "ready":
         raise HTTPException(400, "Video failed QC; regenerate it first")
+    _ensure_fits(v, db.get(SocialAccount, p.social_account_id))
     _transition(db, p, ("awaiting_approval", "failed", "missed"), "approved")
     p.approved_at, p.approved_by, p.last_error = utcnow(), user.id, None
     if p.scheduled_for < utcnow() - timedelta(minutes=5):
@@ -385,6 +397,7 @@ def publish_now(pub_id: int, user: User = AuthUser, db: Session = Depends(get_db
         raise HTTPException(400, "No video attached yet")
     if p.status not in ("approved", "awaiting_approval", "failed"):
         raise HTTPException(409, f"Publication is {p.status}")
+    _ensure_fits(db.get(RenderedVideo, p.rendered_video_id), db.get(SocialAccount, p.social_account_id))
     p.status, p.scheduled_for, p.manual, p.approved_at, p.approved_by = "approved", utcnow(), True, utcnow(), user.id
     db.get(RenderedVideo, p.rendered_video_id).review_status = "approved"
     job, created = enqueue(db, "publish", {"publication_id": p.id}, idempotency_key=f"publish:{p.id}",

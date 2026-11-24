@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 from app.models import VideoScript
+from app.services.publishing import limits
 from app.services.video.ffmpeg import ProbeResult
-
-MAX_BYTES = 250 * 1024 * 1024
 
 
 def _description_check(script: VideoScript, caption_required: bool) -> dict:
@@ -37,7 +36,7 @@ def refresh_caption_check(report: dict, script: VideoScript, *, caption_required
 
 
 def check_video(pr: ProbeResult, vs: dict, script: VideoScript | None, *, captions_enabled: bool = True,
-                duplicate_of: int | None = None, caption_required: bool = True) -> dict:
+                duplicate_of: int | None = None, caption_required: bool = True, check_duration: bool = True) -> dict:
     """`caption_required=False` (imports): an empty social caption is a warning to fix before publishing,
     not a failed video, because captions can be added afterwards."""
     checks: list[dict] = []
@@ -50,12 +49,16 @@ def check_video(pr: ProbeResult, vs: dict, script: VideoScript | None, *, captio
     add("dimensions", (pr.width, pr.height) == (W, H), f"{pr.width}x{pr.height} (expected {W}x{H})")
     add("aspect_9_16", pr.height > 0 and abs(pr.width / pr.height - 9 / 16) < 0.01, f"ratio {pr.width}:{pr.height}")
     add("fps", abs(pr.fps - FPS) < 1.0, f"{pr.fps} fps (expected {FPS})")
-    lo, hi = float(vs["min_duration"]), float(vs["max_duration"])
-    add("duration", lo - 3 <= pr.duration <= hi + 5, f"{pr.duration:.1f}s (allowed {lo:.0f}-{hi:.0f}s)")
+    if check_duration:  # target length of generated videos; imports rely on the per-platform check below
+        lo, hi = float(vs["min_duration"]), float(vs["max_duration"])
+        add("duration", lo - 3 <= pr.duration <= hi + 5, f"{pr.duration:.1f}s (allowed {lo:.0f}-{hi:.0f}s)")
     add("video_codec", pr.vcodec == "h264", f"video codec {pr.vcodec}")
     add("audio_codec", pr.acodec == "aac", f"audio codec {pr.acodec}")
     add("pixel_format", pr.pix_fmt in ("yuv420p", ""), f"pixel format {pr.pix_fmt or 'unknown'}", "warning")
-    add("file_size", pr.size_bytes <= MAX_BYTES, f"{pr.size_bytes / 1e6:.1f} MB (max {MAX_BYTES / 1e6:.0f} MB)")
+    # Size/length limits differ per platform: say where it can go instead of failing it for one platform.
+    elig = limits.eligibility(pr.duration, pr.size_bytes)
+    sev, detail = limits.summary(elig)
+    checks.append({"name": "platforms", "ok": sev != "error", "detail": detail, "severity": sev})
     if script is not None:
         add("captions", (not captions_enabled) or bool(script.script_text.strip()), "captions generated from narration")
         checks.append(_description_check(script, caption_required))
@@ -65,4 +68,4 @@ def check_video(pr: ProbeResult, vs: dict, script: VideoScript | None, *, captio
         too_similar = any(i.get("type") == "too_similar" for i in cc.get("issues", []))
         add("originality", not too_similar, "similar to a recent video" if too_similar else "unique", "warning")
     add("duplicate", duplicate_of is None, f"identical to video #{duplicate_of}" if duplicate_of else "unique file")
-    return summarize(checks)
+    return {**summarize(checks), "platforms": elig}

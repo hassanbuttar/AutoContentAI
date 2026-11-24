@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
-import { CheckCircle2, Clapperboard, Download, Send, ThumbsDown, ThumbsUp, Trash2, Upload, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clapperboard, Download, Send, ThumbsDown, ThumbsUp, Trash2, Upload, XCircle } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { useAction, useApi, useToast } from "@/lib/hooks";
 import { fmtBytes, fmtRelative, PLATFORM_LABEL } from "@/lib/utils";
@@ -9,6 +9,15 @@ import {
   Badge, Button, Card, Dialog, Empty, Field, Input, PageHeader, Select, Spinner, StatusBadge, Switch, Tabs, Textarea,
 } from "@/components/ui";
 import { StoryboardEditor } from "./Studio";
+
+// Platforms a video can go to, from the server's per-platform size/length limits (null = unknown, assume all).
+const fitsOn = (v: any, a: any) =>
+  a.platform === "export" || a.status === "export_only" || !v.platforms || v.platforms[a.platform]?.ok !== false;
+const onlyOn = (v: any): string | null => {
+  const p = v.platforms ? Object.values(v.platforms) as any[] : [];
+  const ok = p.filter((x) => x.ok).map((x) => x.label);
+  return p.length && ok.length < p.length ? (ok.length ? `${ok.join(", ")} only` : "no platform fits") : null;
+};
 
 const splitTags = (s: string) =>
   s.split(/[\s,]+/).filter((x) => x.replace(/#/g, "")).map((x) => (x.startsWith("#") ? x : `#${x}`));
@@ -73,7 +82,7 @@ function ImportDialog({ open, onClose, apps, defaultApp, onImported }: {
           className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 text-center hover:bg-muted/50">
           <Upload className="size-6 text-muted-foreground" />
           <p className="mt-2 text-sm font-medium">{file ? file.name : "Drop a video here or click to choose"}</p>
-          <p className="text-xs text-muted-foreground">{file ? fmtBytes(file.size) : "MP4, MOV, WebM, MKV · up to 3 minutes, 1 GB"}</p>
+          <p className="text-xs text-muted-foreground">{file ? fmtBytes(file.size) : "MP4, MOV, WebM, MKV · up to 1 GB. Instagram takes up to 300 MB and 15 min, TikTok up to 10 min (3 min for most accounts), YouTube larger and longer. The quality check shows where it will go."}</p>
           <input ref={input} type="file" accept="video/*,.mkv" hidden onChange={(e) => pick(e.target.files)} />
         </div>
         <Field label="Application">
@@ -186,7 +195,9 @@ function VideoDetail({ id, onClose }: { id: number; onClose: () => void }) {
               {v.error && <p className="rounded-lg bg-danger/10 p-3 text-sm text-danger">{v.error}</p>}
               {(v.qc_report?.checks ?? []).map((c: any) => (
                 <div key={c.name} className="flex items-center gap-2 text-sm">
-                  {c.ok ? <CheckCircle2 className="size-4 text-success" /> : <XCircle className={`size-4 ${c.severity === "warning" ? "text-warning" : "text-danger"}`} />}
+                  {c.ok
+                    ? (c.severity === "notice" ? <AlertTriangle className="size-4 shrink-0 text-warning" /> : <CheckCircle2 className="size-4 shrink-0 text-success" />)
+                    : <XCircle className={`size-4 shrink-0 ${c.severity === "warning" ? "text-warning" : "text-danger"}`} />}
                   <span className="w-28 font-medium">{c.name.replace(/_/g, " ")}</span><span className="text-muted-foreground">{c.detail}</span>
                 </div>
               ))}
@@ -206,9 +217,16 @@ function VideoDetail({ id, onClose }: { id: number; onClose: () => void }) {
                 <p className="text-sm font-semibold">Schedule on an account (manual override)</p>
                 <Field label="Account">
                   <Select value={sched.account} onChange={(e) => setSched({ ...sched, account: e.target.value })}>
-                    <option value="">Select…</option>{accs.map((a) => <option key={a.id} value={a.id}>{PLATFORM_LABEL[a.platform]} · {a.display_name}</option>)}
+                    <option value="">Select…</option>
+                    {accs.map((a) => {
+                      const fits = fitsOn(v, a);
+                      return <option key={a.id} value={a.id} disabled={!fits}>
+                        {PLATFORM_LABEL[a.platform]} · {a.display_name}{fits ? "" : ` (won't accept: ${v.platforms[a.platform].problems.join("; ")})`}
+                      </option>;
+                    })}
                   </Select>
                 </Field>
+                {onlyOn(v) && <p className="text-xs text-warning">This video fits {onlyOn(v)}; accounts on other platforms are disabled.</p>}
                 <Field label="When (empty = now)"><Input type="datetime-local" value={sched.when} onChange={(e) => setSched({ ...sched, when: e.target.value })} /></Field>
                 <Switch checked={sched.approve} onChange={(x) => setSched({ ...sched, approve: x })} label="Approve immediately" />
                 <Button disabled={!sched.account || v.status !== "ready"} loading={schedule.isPending} onClick={() => schedule.mutate()}><Send /> Add to queue</Button>
@@ -262,6 +280,7 @@ export function Library() {
               </div>
               <p className="mt-2 line-clamp-1 text-sm font-medium">{v.topic || v.hook}</p>
               <p className="text-xs text-muted-foreground">{v.application_name} · {v.duration ? `${Math.round(v.duration)}s` : "—"} · {fmtRelative(v.created_at)}</p>
+              {onlyOn(v) && <p className="text-[11px] font-medium text-warning">{onlyOn(v)}</p>}
               {v.publications.length > 0 && <p className="text-[11px] text-muted-foreground">{v.publications.map((p: any) => `${p.platform}:${p.status}`).join(" · ")}</p>}
             </button>
           ))}

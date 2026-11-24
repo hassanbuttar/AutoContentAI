@@ -651,3 +651,32 @@ def test_delete_video_while_file_is_locked(client, env, monkeypatch):
         q.retry_now(s, s.get(ScheduledJob, job_id))
     assert run_job(job_id).status == "succeeded"
     assert not video_file.exists()
+
+
+def test_oversized_video_only_goes_to_platforms_that_accept_it(client, env):
+    """A video too big for Instagram stays usable: QC says where it will go, Instagram scheduling is refused,
+    TikTok is allowed, and automatic rules never pick it for Instagram."""
+    from app.core.db import SessionLocal
+    from app.models import PublicationRecord, RenderedVideo
+    from app.services.publishing.limits import GB
+    from app.workers.handlers import find_reusable_video
+
+    a = client.post("/api/applications", json={"name": "Stylwear"}).json()
+    v = _import(client, a["id"], _clip(env, "big.mp4"), caption="Big one").json()
+    with SessionLocal() as s:  # stand in for a 1 GB upload (a real one is too slow for the suite)
+        s.get(RenderedVideo, v["id"]).size_bytes = 1 * GB
+        s.commit()
+    d = client.get(f"/api/videos/{v['id']}").json()
+    assert d["status"] == "ready"
+    assert d["platforms"]["instagram"]["ok"] is False and d["platforms"]["tiktok"]["ok"] and d["platforms"]["youtube"]["ok"]
+    ig = client.post("/api/accounts", json={"application_id": a["id"], "platform": "instagram", "display_name": "IG"}).json()
+    tt = client.post("/api/accounts", json={"application_id": a["id"], "platform": "tiktok", "display_name": "TT"}).json()
+    r = client.post("/api/publications", json={"video_id": v["id"], "social_account_id": ig["id"]})
+    assert r.status_code == 400 and "Instagram Reels won't accept this video: file 1.0 GB is over the 300 MB limit" in r.text
+    assert client.post("/api/publications", json={"video_id": v["id"], "social_account_id": tt["id"]}).status_code == 201
+    with SessionLocal() as s:
+        pub = PublicationRecord(application_id=a["id"], social_account_id=ig["id"], platform="instagram",
+                                scheduled_for=datetime(2030, 1, 1), status="planned", idempotency_key="t-ig")
+        s.add(pub)
+        s.flush()
+        assert find_reusable_video(s, pub, None) is None  # the only video doesn't fit Instagram

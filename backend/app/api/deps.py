@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import current_user
 from app.core.db import get_db
+from app.services.publishing import limits as _limits
 from app.models import (Application, ApplicationAsset, ApplicationSource, ComfyWorkflow, PublicationRecord,
                         PublishingRule, RenderedVideo, ScheduledJob, SocialAccount, User)
 
@@ -88,7 +89,9 @@ def ser_video(v: RenderedVideo | None) -> dict | None:
             "error": v.error, "video_script_id": v.video_script_id, "storyboard_id": v.storyboard_id,
             "content_idea_id": v.content_idea_id, "created_at": iso(v.created_at),
             "url": f"/api/videos/{v.id}/file" if v.path else None,
-            "thumbnail_url": f"/api/videos/{v.id}/thumbnail" if v.thumbnail_path else None}
+            "thumbnail_url": f"/api/videos/{v.id}/thumbnail" if v.thumbnail_path else None,
+            # live per-platform fit (size/length limits), so older videos and changed limits are covered too
+            "platforms": _limits.eligibility(v.duration, v.size_bytes) if v.duration else None}
 
 
 def ser_pub(p: PublicationRecord, account: SocialAccount | None = None, app: Application | None = None) -> dict:

@@ -134,16 +134,16 @@ class TikTokAdapter(PlatformAdapter):
             publish_id = data["publish_id"]
             ctx.save_state({"publish_id": publish_id, "mode": mode})
             ctx.progress("Uploading to TikTok")
-            with open(ctx.video_path, "rb") as fh:
-                blob = fh.read()
-            for i in range(count):
-                start = i * chunk
-                end = size if i == count - 1 else start + chunk
-                part = blob[start:end]
-                u = self.http.put(data["upload_url"], content=part, headers={
-                    "Content-Type": "video/mp4", "Content-Length": str(len(part)),
-                    "Content-Range": f"bytes {start}-{end - 1}/{size}"})
-                self.raise_for(u, f"TikTok chunk {i + 1}/{count}")
+            with open(ctx.video_path, "rb") as fh:  # one chunk in memory at a time (files can be up to 4 GB)
+                for i in range(count):
+                    start = i * chunk
+                    end = size if i == count - 1 else start + chunk
+                    fh.seek(start)
+                    part = fh.read(end - start)
+                    u = self.http.put(data["upload_url"], content=part, headers={
+                        "Content-Type": "video/mp4", "Content-Length": str(len(part)),
+                        "Content-Range": f"bytes {start}-{end - 1}/{size}"})
+                    self.raise_for(u, f"TikTok chunk {i + 1}/{count}")
         return self._wait(ctx, publish_id, float(s.get("processing_timeout", 600)))
 
     def _fetch(self, ctx: PublishContext, publish_id: str) -> dict:

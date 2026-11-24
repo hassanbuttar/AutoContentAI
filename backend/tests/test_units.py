@@ -209,3 +209,40 @@ def test_instagram_resumes_failed_upload_into_same_container(tmp_path):
     assert res.status == "published" and res.external_id == "m1"
     assert calls == {"create": 1, "upload": 1, "publish": 1, "ai": ["true"]}
     assert state["ai_label"] is True
+
+
+def test_platform_limits_and_qc_wording():
+    from app.services.publishing import limits
+    from app.services.publishing.base import PostContent
+    from app.services.publishing.instagram import InstagramAdapter
+    from app.services.video import qc
+    from app.services.video.ffmpeg import ProbeResult
+
+    MB, GB = limits.MB, limits.GB
+    # 1 GB, 60 s: Instagram (300 MB) can't take it; TikTok (4 GB) and YouTube can
+    e = limits.eligibility(60, 1 * GB)
+    assert not e["instagram"]["ok"] and "over the 300 MB limit" in e["instagram"]["problems"][0]
+    assert e["tiktok"]["ok"] and e["youtube"]["ok"]
+    sev, detail = limits.summary(e)
+    assert sev == "notice" and detail.startswith("Will only be published to TikTok, YouTube.")
+    assert "Instagram Reels: file 1.0 GB is over the 300 MB limit" in detail
+    # 5 min, 80 MB: everywhere, with notes (TikTok account permission, YouTube regular video)
+    e = limits.eligibility(300, 80 * MB)
+    assert all(v["ok"] for v in e.values())
+    assert "5- or 10-minute" in e["tiktok"]["notes"][0] and "not a Short" in e["youtube"]["notes"][0]
+    # 20 min: only YouTube (Instagram 15 min, TikTok 10 min), and it needs a verified account
+    e = limits.eligibility(20 * 60, 200 * MB)
+    assert [p for p, v in e.items() if v["ok"]] == ["youtube"] and "verified" in e["youtube"]["notes"][0]
+    # under Instagram's 3 s minimum; and an excessive bitrate
+    assert not limits.check_platform("instagram", 2, 1 * MB)["ok"]
+    assert "bitrate" in limits.check_platform("instagram", 10, 50 * MB)["problems"][0]  # 40 Mbps average
+    # nothing fits -> QC hard error; fits somewhere -> video stays usable
+    assert limits.summary(limits.eligibility(13 * 3600, 2 * GB))[0] == "error"
+    rep = qc.check_video(ProbeResult(60, 1080, 1920, 25, "h264", "aac", "yuv420p", 1 * GB),
+                         {"width": 1080, "height": 1920, "fps": 25}, None, check_duration=False)
+    row = next(c for c in rep["checks"] if c["name"] == "platforms")
+    assert rep["ok"] and row["ok"] and row["severity"] == "notice" and not rep["platforms"]["instagram"]["ok"]
+    # publish-time preflight refuses the platform with the official limit
+    probs = InstagramAdapter().preflight({"duration": 600, "size_bytes": 400 * MB, "width": 1080, "height": 1920},
+                                         PostContent("t", "c", []), {})
+    assert probs == ["Instagram Reels: file 400 MB is over the 300 MB limit"]

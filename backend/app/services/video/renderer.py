@@ -6,7 +6,6 @@ Then: concat, optional intro/outro + licensed music, thumbnail, probe, QC.
 ComfyUI failures degrade per scene to local fallbacks with an actionable log entry."""
 from __future__ import annotations
 
-import hashlib
 import logging
 import shutil
 import time
@@ -332,7 +331,9 @@ class Renderer:
         thumb = get_settings().storage("thumbnails", app.slug) / (final.stem + ".jpg")
         ffmpeg.run(["-ss", "1.0", "-i", str(final), "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "3", str(thumb)])
         pr = ffmpeg.probe(final)
-        sha = hashlib.sha256(final.read_bytes()).hexdigest()
+        from app.services.video.importer import sha256_file
+
+        sha = sha256_file(final)
         dup = db.scalar(select(RenderedVideo).where(RenderedVideo.application_id == app.id, RenderedVideo.sha256 == sha,
                                                     RenderedVideo.id != video.id))
         report = qc.check_video(pr, vs, script, captions_enabled=cap.get("enabled", True), duplicate_of=dup.id if dup else None)

@@ -20,11 +20,22 @@ from app.core.config import get_settings
 from app.core.paths import to_storage_rel
 from app.models import Application, ContentIdea, RenderedVideo, VideoScript
 from app.services.settings_service import effective_video_settings
+from app.services.publishing import limits
 from app.services.video import ffmpeg, library, qc
 
 FIT_MODES = ("auto", "pad", "crop")
-IMPORT_MAX_DURATION = 180.0  # longest clip every supported platform accepts through its API (Shorts / Reels)
+# Hard limits only where *no* platform could take the video; per-platform limits are reported by QC.
+IMPORT_MAX_DURATION = limits.MAX_SECONDS_ANY
 FPS_RANGE = (23.9, 60.5)  # standard rates (24/25/30/50/60) are kept as-is; anything else is converted to the target
+
+
+def sha256_file(path: Path, chunk: int = 8 * 1024 * 1024) -> str:
+    """Hash in chunks: a 1 GB import must not be loaded into memory at once."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while block := fh.read(chunk):
+            h.update(block)
+    return h.hexdigest()
 
 
 def _out_fps(pr: ffmpeg.ProbeResult, vs: dict) -> float:
@@ -90,8 +101,9 @@ def import_video(db: Session, app: Application, src: Path, *, original_name: str
         raise ImportProblem("Could not read the file as a video") from exc
     if not pr.width or not pr.height or pr.duration <= 0:
         raise ImportProblem("The file has no readable video stream")
-    if pr.duration > IMPORT_MAX_DURATION + 1:
-        raise ImportProblem(f"Video is {pr.duration:.0f}s; the limit is {IMPORT_MAX_DURATION:.0f}s (YouTube Shorts / Instagram Reels)")
+    if pr.duration > IMPORT_MAX_DURATION:  # longer than any platform accepts
+        raise ImportProblem(f"Video is {pr.duration / 3600:.1f} h; no platform accepts videos longer than "
+                            f"{IMPORT_MAX_DURATION / 3600:.0f} h")
 
     vs = effective_video_settings(db, app.video_settings)
     out_dir = get_settings().storage("videos", app.slug)
@@ -105,7 +117,7 @@ def import_video(db: Session, app: Application, src: Path, *, original_name: str
             _conform(src, final, pr, vs, "pad" if fit == "auto" else fit)
         else:
             shutil.copyfile(src, final)
-        sha = hashlib.sha256(final.read_bytes()).hexdigest()
+        sha = sha256_file(final)
         dup = db.scalar(select(RenderedVideo).where(RenderedVideo.application_id == app.id, RenderedVideo.sha256 == sha))
         if dup is not None:
             if not library.is_replaceable(db, dup):
@@ -139,9 +151,8 @@ def import_video(db: Session, app: Application, src: Path, *, original_name: str
                                                  "ai_generated": bool(ai_generated)}})
     db.add(script)
     db.flush()
-    report = qc.check_video(out, {**vs, "fps": round(_out_fps(pr, vs)), "min_duration": 3,
-                                  "max_duration": IMPORT_MAX_DURATION}, script,
-                            captions_enabled=False, caption_required=False)
+    report = qc.check_video(out, {**vs, "fps": round(_out_fps(pr, vs))}, script,
+                            captions_enabled=False, caption_required=False, check_duration=False)
     for c in report["checks"]:
         if c["name"] == "captions":
             c["detail"] = "burned-in captions are up to the source video"

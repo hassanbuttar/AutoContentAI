@@ -122,6 +122,11 @@ def find_reusable_video(db, pub: PublicationRecord, rule: PublishingRule | None)
                                                          RenderedVideo.status == "ready",
                                                          RenderedVideo.review_status != "rejected")
                              .order_by(RenderedVideo.created_at.asc())))
+    account = db.get(SocialAccount, pub.social_account_id)
+    if account is not None and account.status != "export_only":  # skip videos this platform won't accept
+        from app.services.publishing import limits
+
+        videos = [v for v in videos if limits.check_platform(pub.platform, v.duration, v.size_bytes)["ok"]]
     def uses(v):
         return list(db.scalars(select(PublicationRecord).where(PublicationRecord.rendered_video_id == v.id,
                                                                PublicationRecord.status.in_(LIVE_PUB_STATUSES),

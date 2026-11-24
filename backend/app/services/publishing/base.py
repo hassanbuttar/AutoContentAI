@@ -138,8 +138,13 @@ class PlatformAdapter:
 
     # ---- publishing
     def preflight(self, video_meta: dict, post: PostContent, account_settings: dict) -> list[str]:
+        from app.services.publishing import limits
+
         problems = []
-        if video_meta.get("duration", 0) > self.max_duration:
+        if self.platform in limits.LIMITS:  # official per-platform size/length limits
+            fit = limits.check_platform(self.platform, video_meta.get("duration"), video_meta.get("size_bytes"))
+            problems += [f"{self.display_name}: {p}" for p in fit["problems"]]
+        elif video_meta.get("duration", 0) > self.max_duration:
             problems.append(f"{self.display_name}: video is {video_meta['duration']:.0f}s, max {self.max_duration:.0f}s")
         if (video_meta.get("width"), video_meta.get("height")) != (1080, 1920) and video_meta.get("height", 0) <= video_meta.get("width", 1):
             problems.append(f"{self.display_name}: video must be vertical")

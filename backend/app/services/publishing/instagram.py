@@ -24,7 +24,7 @@ IG_SCOPES = "instagram_business_basic,instagram_business_content_publish,instagr
 class InstagramAdapter(PlatformAdapter):
     platform = "instagram"
     display_name = "Instagram Reels"
-    max_duration = 180.0
+    max_duration = 900.0  # see limits.py
 
     def _variant(self, s: dict) -> str:
         return s.get("variant", "facebook_login")

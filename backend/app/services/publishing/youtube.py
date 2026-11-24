@@ -17,10 +17,16 @@ UPLOAD = "https://www.googleapis.com/upload/youtube/v3/videos"
 SCOPES = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly"
 
 
+def _watch_url(vid: str, video_meta: dict) -> str:
+    """Vertical videos up to 3 minutes are Shorts; longer ones are regular videos."""
+    short = (video_meta.get("duration") or 0) <= 180 and (video_meta.get("height") or 0) >= (video_meta.get("width") or 0)
+    return f"https://www.youtube.com/shorts/{vid}" if short else f"https://www.youtube.com/watch?v={vid}"
+
+
 class YouTubeAdapter(PlatformAdapter):
     platform = "youtube"
     display_name = "YouTube Shorts"
-    max_duration = 180.0
+    max_duration = 43200.0  # see limits.py
 
     def capabilities(self, s: dict) -> dict:
         return {"direct_publish": True, "oauth": True, "metrics": ["views", "likes", "comments"],
@@ -89,12 +95,17 @@ class YouTubeAdapter(PlatformAdapter):
                 raise PublishError("YouTube did not return an upload session URL", retryable=True)
             ctx.save_state({"upload_session": session})
         ctx.progress("Uploading to YouTube")
-        with open(ctx.video_path, "rb") as fh:
-            r = self.http.put(session, content=fh.read(), headers={**self._h(ctx.tokens), "Content-Type": "video/mp4"})
+        def stream(chunk: int = 8 * 1024 * 1024):  # stream from disk instead of loading the whole file
+            with open(ctx.video_path, "rb") as fh:
+                while block := fh.read(chunk):
+                    yield block
+
+        r = self.http.put(session, content=stream(), headers={**self._h(ctx.tokens), "Content-Type": "video/mp4",
+                                                              "Content-Length": str(size)})
         if r.status_code in (200, 201):
             vid = r.json()["id"]
             ctx.save_state({"video_id": vid})
-            return PublishResult("published", vid, f"https://www.youtube.com/shorts/{vid}")
+            return PublishResult("published", vid, _watch_url(vid, ctx.video_meta))
         if r.status_code == 404:  # session expired
             ctx.save_state({"upload_session": None})
         self.raise_for(r, "YouTube upload")
@@ -106,7 +117,7 @@ class YouTubeAdapter(PlatformAdapter):
             r = self.http.get(f"{API}/videos", params={"part": "status", "id": vid}, headers=self._h(ctx.tokens))
             self.raise_for(r, "YouTube verify")
             if r.json().get("items"):
-                return PublishResult("published", vid, f"https://www.youtube.com/shorts/{vid}")
+                return PublishResult("published", vid, _watch_url(vid, ctx.video_meta))
             return PublishResult("not_published", detail="video id not found")
         session = ctx.state.get("upload_session")
         if not session:
@@ -116,7 +127,7 @@ class YouTubeAdapter(PlatformAdapter):
         if r.status_code in (200, 201):
             vid = r.json()["id"]
             ctx.save_state({"video_id": vid})
-            return PublishResult("published", vid, f"https://www.youtube.com/shorts/{vid}")
+            return PublishResult("published", vid, _watch_url(vid, ctx.video_meta))
         if r.status_code in (308, 404, 410):  # incomplete or expired: nothing was published
             ctx.save_state({"upload_session": None if r.status_code != 308 else session})
             return PublishResult("not_published", detail=f"upload incomplete ({r.status_code})")
